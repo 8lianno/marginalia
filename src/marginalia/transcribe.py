@@ -71,21 +71,54 @@ def _ensure_binary() -> Path:
     return binary
 
 
-def transcribe_local(audio_path: Path) -> str:
-    """Transcribe a WAV file using the Apple Speech Swift helper. Returns transcript text."""
+def transcribe_local(
+    audio_path: Path,
+    on_heartbeat: callable | None = None,
+) -> str:
+    """Transcribe a WAV file using the Apple Speech Swift helper.
+
+    The Swift helper emits "." lines as heartbeats during transcription
+    and a final "TRANSCRIPT: <text>" line when done.  We stream stdout
+    line-by-line via Popen so the caller can update a progress bar in
+    real time.
+
+    Args:
+        audio_path: Path to the WAV file.
+        on_heartbeat: Optional callback invoked on each heartbeat (no args).
+
+    Returns:
+        The transcript text.
+    """
     binary = _ensure_binary()
-    result = subprocess.run(
+    proc = subprocess.Popen(
         [str(binary), str(audio_path)],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=3600,
     )
-    if result.returncode != 0:
-        error = result.stderr.strip() or "Unknown transcription error"
-        # Parse structured error codes from the Swift helper
+
+    transcript = ""
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line == ".":
+                if on_heartbeat:
+                    on_heartbeat()
+            elif line.startswith("TRANSCRIPT: "):
+                transcript = line[len("TRANSCRIPT: "):]
+            # Ignore any other lines
+    except Exception:
+        proc.kill()
+        raise
+
+    proc.wait()
+
+    if proc.returncode != 0:
+        error = (proc.stderr.read() if proc.stderr else "").strip() or "Unknown transcription error"
         friendly = _parse_helper_error(error)
         raise RuntimeError(friendly)
-    return result.stdout.strip()
+
+    return transcript
 
 
 def _parse_helper_error(raw_error: str) -> str:

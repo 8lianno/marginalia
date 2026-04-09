@@ -406,7 +406,7 @@ def _do_transcript(
 
         tracker.update(rel, "Transcribing")
         logger.video_stage(rel, "transcribing")
-        transcript_text = transcribe_local(audio_path)
+        transcript_text = transcribe_local(audio_path, on_heartbeat=tracker.pulse)
 
     meta = TranscriptMeta(
         source=rel,
@@ -518,7 +518,7 @@ def _fresh_transcribe(
         audio_path = extract_audio(video.path, Path(tmp_dir))
         tracker.update(video.relative, "Transcribing")
         logger.video_stage(video.relative, "transcribing")
-        transcript_text = transcribe_local(audio_path)
+        transcript_text = transcribe_local(audio_path, on_heartbeat=tracker.pulse)
 
     transcript_meta = TranscriptMeta(
         source=video.relative,

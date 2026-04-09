@@ -158,6 +158,16 @@ class ProgressTracker:
         else:
             _print(f"  {_c(_RED, f'x failed: {video} -- {reason}')}")
 
+    def pulse(self) -> None:
+        """Visual heartbeat — indicates the current task is still alive.
+
+        In rich mode this triggers a spinner tick. In plain mode it's a no-op
+        (we don't want to spam dots in CI logs).
+        """
+        if self._progress:
+            # Touching the task description triggers a refresh of the spinner
+            self._progress.update(self._task)
+
     def log(self, message: str) -> None:
         """Print a message above the progress bar."""
         if self._progress:

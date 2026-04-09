@@ -11,10 +11,17 @@ from marginalia.models import Mode, PipelineConfig
 app = typer.Typer(add_completion=False, help="Margin notes for the videos you watch.")
 
 
+def _resolve_output(course: Path, output: Path | None) -> Path:
+    """Default output to <course>/marginalia/ when not specified."""
+    if output is not None:
+        return output.resolve()
+    return (course / "marginalia").resolve()
+
+
 @app.command()
 def extract(
     course: Path = typer.Argument(..., help="Course folder containing video files"),
-    output: Path = typer.Option(Path("marginalia"), "--output", "-o", help="Output directory (default: ./marginalia/)"),
+    output: Path = typer.Option(None, "--output", "-o", help="Output directory (default: <course>/marginalia/)"),
     mode: Mode = typer.Option(Mode.TRANSCRIPT, "--mode", "-m", help="Output mode: transcript or brief"),
     model: str = typer.Option("gemini-2.0-flash", "--model", help="LLM model for brief mode"),
     force: bool = typer.Option(False, "--force", help="Bypass skip logic, reprocess everything"),
@@ -43,7 +50,7 @@ def extract(
 
     config = PipelineConfig(
         input_dir=course.resolve(),
-        output_dir=output.resolve(),
+        output_dir=_resolve_output(course, output),
         mode=mode,
         model=model,
         force=force,
@@ -63,7 +70,7 @@ def extract(
 @app.command()
 def plan(
     course: Path = typer.Argument(..., help="Course folder containing video files"),
-    output: Path = typer.Option(Path("marginalia"), "--output", "-o", help="Output directory (default: ./marginalia/)"),
+    output: Path = typer.Option(None, "--output", "-o", help="Output directory (default: <course>/marginalia/)"),
     mode: Mode = typer.Option(Mode.TRANSCRIPT, "--mode", "-m", help="Output mode to plan"),
     model: str = typer.Option("gemini-2.0-flash", "--model", help="LLM model for brief mode"),
     force: bool = typer.Option(False, "--force", help="Show what force would reprocess"),
@@ -76,7 +83,7 @@ def plan(
 
     config = PipelineConfig(
         input_dir=course.resolve(),
-        output_dir=output.resolve(),
+        output_dir=_resolve_output(course, output),
         mode=mode,
         model=model,
         force=force,
@@ -91,7 +98,7 @@ def plan(
 @app.command()
 def retry(
     course: Path = typer.Argument(..., help="Course folder containing video files"),
-    output: Path = typer.Option(Path("marginalia"), "--output", "-o", help="Output directory (default: ./marginalia/)"),
+    output: Path = typer.Option(None, "--output", "-o", help="Output directory (default: <course>/marginalia/)"),
     mode: Mode = typer.Option(Mode.TRANSCRIPT, "--mode", "-m", help="Mode to retry failures in"),
     model: str = typer.Option("gemini-2.0-flash", "--model", help="LLM model for brief mode"),
     verbose: bool = typer.Option(False, "--verbose", help="Show debug details"),
@@ -109,7 +116,7 @@ def retry(
 
     config = PipelineConfig(
         input_dir=course.resolve(),
-        output_dir=output.resolve(),
+        output_dir=_resolve_output(course, output),
         mode=mode,
         model=model,
         verbose=verbose,
@@ -126,12 +133,12 @@ def retry(
 @app.command()
 def status(
     course: Path = typer.Argument(..., help="Course folder containing video files"),
-    output: Path = typer.Option(Path("marginalia"), "--output", "-o", help="Output directory (default: ./marginalia/)"),
+    output: Path = typer.Option(None, "--output", "-o", help="Output directory (default: <course>/marginalia/)"),
 ) -> None:
     """Show processing status of a course."""
     config = PipelineConfig(
         input_dir=course.resolve(),
-        output_dir=output.resolve(),
+        output_dir=_resolve_output(course, output),
     )
 
     from marginalia.pipeline import run_status

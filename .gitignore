@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+.env
+.marginalia-state.json
+src/marginalia/swift/transcribe_helper

@@ -76,17 +76,31 @@ marginalia retry ./my-course --mode transcript
 
 Reprocesses only videos that failed in the specified mode.
 
+### Force reprocess a specific video
+
+```bash
+marginalia extract ./my-course --force --path 01-intro/welcome.mp4
+```
+
+Force the entire course (prompts for confirmation if >10 videos):
+
+```bash
+marginalia extract ./my-course --force --yes
+```
+
 ## Options
 
 ```
 marginalia extract <course> [options]
 
-  -o, --output DIR     Output directory (default: ./marginalia)
-  -m, --mode MODE      transcript (default) or brief
-  --model TEXT          LLM model for brief mode (default: gemini-2.0-flash)
-  --force              Reprocess everything, ignore prior state
-  --yes                Skip confirmation prompts
-  --verbose            Debug output
+  -o, --output DIR       Output directory (default: ./marginalia)
+  -m, --mode MODE        transcript (default) or brief
+  --model TEXT           LLM model for brief mode (default: gemini-2.0-flash)
+  --force                Reprocess everything, ignore prior state
+  --path TEXT            Restrict --force to a specific video path
+  --yes                  Skip confirmation prompts
+  --verbose              Show ffmpeg, Swift helper, and LLM details
+  --no-preflight         Skip API key validation in brief mode
 ```
 
 ## Output format
@@ -152,6 +166,27 @@ Marginalia tracks processing state in `.marginalia-state.json` in the output dir
 - Brief mode: typically under $0.30 for an 8-hour course when transcripts are cached
 
 Pre-run cost estimates are shown before processing begins. Actual cost is reported in the end summary.
+
+## First-run setup
+
+On first run, Marginalia compiles a small Swift helper for Apple Speech transcription. This requires:
+
+1. **Xcode Command Line Tools** -- install with `xcode-select --install`
+2. **Speech Recognition permission** -- System Settings > Privacy & Security > Speech Recognition
+3. **On-device speech model** -- System Settings > General > Keyboard > Dictation > enable "On-Device Dictation"
+
+If any of these are missing, Marginalia will tell you exactly what to do.
+
+## Logging
+
+Every run writes a structured JSONL log to `<output>/.logs/run-<timestamp>.jsonl`. Each line is a JSON object with fields like `timestamp`, `event`, `video`, `stage`. Failure events include full stack traces. Useful for debugging failures after the terminal is closed.
+
+## Environment
+
+- `GEMINI_API_KEY` -- required for brief mode, ignored in transcript mode
+- `NO_COLOR` -- set to any value to disable ANSI color output
+
+Non-TTY environments (pipes, cron) automatically disable colors and will error on confirmation prompts (use `--yes` to bypass).
 
 ## Development
 

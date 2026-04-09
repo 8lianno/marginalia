@@ -80,7 +80,6 @@ def test_needs_processing_transcript_done(tmp_path: Path):
 
 
 def test_needs_processing_transcript_done_brief_pending(tmp_path: Path):
-    """Transcript done should not skip brief mode."""
     video = _make_video(tmp_path)
     state = RunState(
         videos={
@@ -122,7 +121,6 @@ def test_needs_processing_force(tmp_path: Path):
 
 
 def test_needs_processing_fingerprint_changed(tmp_path: Path):
-    """Fingerprint change should require reprocessing even if mode was done."""
     video = _make_video(tmp_path)
     state = RunState(
         videos={
@@ -133,6 +131,22 @@ def test_needs_processing_fingerprint_changed(tmp_path: Path):
         }
     )
     assert needs_processing(video, state, Mode.TRANSCRIPT) is True
+
+
+def test_fingerprint_change_invalidates_both_modes(tmp_path: Path):
+    """When fingerprint changes, both transcript and brief should need reprocessing."""
+    video = _make_video(tmp_path)
+    state = RunState(
+        videos={
+            "test.mp4": VideoState(
+                fingerprint="999:0.0",
+                transcript=ModeState(status=VideoStatus.COMPLETED),
+                brief=ModeState(status=VideoStatus.COMPLETED),
+            )
+        }
+    )
+    assert needs_processing(video, state, Mode.TRANSCRIPT) is True
+    assert needs_processing(video, state, Mode.BRIEF) is True
 
 
 def test_get_failed_videos(tmp_path: Path):

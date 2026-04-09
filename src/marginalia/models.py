@@ -17,10 +17,18 @@ class VideoFile(BaseModel):
     size: int
     mtime: float
     duration_seconds: float | None = None
+    output_name: str | None = None  # Override for collision resolution
 
     @property
     def fingerprint(self) -> str:
         return f"{self.size}:{self.mtime}"
+
+    @property
+    def md_relative(self) -> str:
+        """The relative path for the output .md file."""
+        if self.output_name:
+            return self.output_name
+        return str(Path(self.relative).with_suffix(".md"))
 
 
 class VideoStatus(str, Enum):
@@ -80,5 +88,7 @@ class PipelineConfig(BaseModel):
     mode: Mode = Mode.TRANSCRIPT
     model: str = "gemini-2.0-flash"
     force: bool = False
+    force_path: str | None = None
     yes: bool = False
     verbose: bool = False
+    no_preflight: bool = False

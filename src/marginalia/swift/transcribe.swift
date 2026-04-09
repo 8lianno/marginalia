@@ -3,10 +3,18 @@ import Speech
 
 /// Transcribes a WAV audio file using Apple Speech framework (on-device).
 /// Usage: transcribe <path-to-wav>
-/// Outputs the transcript text to stdout. Exits 1 on failure with error on stderr.
+/// Outputs the transcript text to stdout. Exits with distinct codes per failure:
+///   1 = usage error / file not found
+///   2 = speech recognizer not available (locale or permission)
+///   3 = on-device model not downloaded
+///   4 = recognition failed at runtime
+
+func writeError(_ message: String) {
+    FileHandle.standardError.write("Error: \(message)\n".data(using: .utf8)!)
+}
 
 guard CommandLine.arguments.count == 2 else {
-    FileHandle.standardError.write("Usage: transcribe <path-to-wav>\n".data(using: .utf8)!)
+    writeError("Usage: transcribe <path-to-wav>")
     exit(1)
 }
 
@@ -14,18 +22,24 @@ let audioPath = CommandLine.arguments[1]
 let audioURL = URL(fileURLWithPath: audioPath)
 
 guard FileManager.default.fileExists(atPath: audioPath) else {
-    FileHandle.standardError.write("Error: File not found: \(audioPath)\n".data(using: .utf8)!)
+    writeError("File not found: \(audioPath)")
     exit(1)
 }
 
 guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
-    FileHandle.standardError.write("Error: Speech recognizer not available for en-US\n".data(using: .utf8)!)
-    exit(1)
+    writeError("SPEECH_LOCALE_UNAVAILABLE: Speech recognizer not available for en-US.")
+    exit(2)
 }
 
 guard recognizer.isAvailable else {
-    FileHandle.standardError.write("Error: Speech recognizer is not available. Check System Settings > Privacy > Speech Recognition.\n".data(using: .utf8)!)
-    exit(1)
+    writeError("SPEECH_NOT_AVAILABLE: On-device speech recognition is not available. Enable it in System Settings > Privacy & Security > Speech Recognition, and ensure the on-device model is downloaded in System Settings > General > Keyboard > Dictation.")
+    exit(2)
+}
+
+// Check if on-device recognition is supported
+if !recognizer.supportsOnDeviceRecognition {
+    writeError("SPEECH_MODEL_NOT_DOWNLOADED: On-device speech model is not downloaded. Go to System Settings > General > Keyboard > Dictation and enable 'On-Device Dictation' to download the model.")
+    exit(3)
 }
 
 let semaphore = DispatchSemaphore(value: 0)
@@ -51,8 +65,13 @@ recognizer.recognitionTask(with: request) { result, error in
 semaphore.wait()
 
 if let error = transcriptError {
-    FileHandle.standardError.write("Error: \(error.localizedDescription)\n".data(using: .utf8)!)
-    exit(1)
+    let desc = error.localizedDescription
+    if desc.contains("kAFAssistantErrorDomain") || desc.contains("not authorized") {
+        writeError("SPEECH_PERMISSION_DENIED: Speech recognition permission denied. Grant access in System Settings > Privacy & Security > Speech Recognition.")
+        exit(2)
+    }
+    writeError("RECOGNITION_FAILED: \(desc)")
+    exit(4)
 }
 
 print(transcriptText)

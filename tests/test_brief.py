@@ -22,7 +22,6 @@ def test_build_prompt_contains_source():
 def test_build_prompt_uses_transcript_language():
     prompt = build_prompt("file.mp4", "00:01:00")
     assert "transcript" in prompt.lower()
-    assert "audio" not in prompt.lower() or "transcript" in prompt.lower()
 
 
 def test_clean_filename_to_title():
@@ -113,7 +112,7 @@ def test_format_transcript():
     assert 'mode: "transcript"' in result
     assert 'engine: "apple-speech"' in result
     assert "Hello this is the transcript text." in result
-    assert "## Core Idea" not in result  # No brief sections in transcript mode
+    assert "## Core Idea" not in result
 
 
 def test_format_duration():

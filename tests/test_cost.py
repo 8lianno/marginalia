@@ -38,5 +38,4 @@ def test_no_duration_means_zero_cost():
         VideoFile(path=Path("/a.mp4"), relative="a.mp4", size=100, mtime=0, duration_seconds=None),
     ]
     est = estimate_cost(videos, Mode.BRIEF)
-    # Still has some cost from prompt tokens and output tokens
     assert est.estimated_cost_usd >= 0

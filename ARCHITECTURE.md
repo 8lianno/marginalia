@@ -17,17 +17,18 @@ Course folder          Marginalia           Output folder
 src/marginalia/
   cli.py           Typer app with subcommands: extract, plan, retry, status
   models.py        Pydantic data models: VideoFile, VideoState, RunState, configs
-  discovery.py     Recursive folder walk, video extension filtering, fingerprinting
-  audio.py         ffmpeg/ffprobe: extract WAV audio, probe duration, detect audio streams
-  transcribe.py    Apple Speech via Swift helper (local) + Gemini LLM (brief mode)
+  discovery.py     Recursive folder walk, video filtering, fingerprinting, collision detection
+  audio.py         ffmpeg/ffprobe: extract WAV audio, probe duration (robust), detect audio
+  transcribe.py    Apple Speech via Swift helper + Gemini LLM + preflight + transcript guard
   brief.py         Prompt template, section validation, markdown formatting for both modes
   state.py         JSON state file: load, save (atomic), per-mode skip logic
-  pipeline.py      Orchestration: run, run_retry, run_plan, run_status
+  pipeline.py      Orchestration: run, run_retry, run_plan, run_status, JSONL logging
   cost.py          Cost estimation (transcript=$0, brief=token-based estimate)
-  console.py       Terminal output: stage indicators, skip/success/failure, summary
+  console.py       Terminal output: colors (NO_COLOR aware), verbose mode, confirm prompts
+  logging.py       Structured JSONL run logs to <output>/.logs/
 
   swift/
-    transcribe.swift   Apple Speech on-device transcription (compiled on first run)
+    transcribe.swift   Apple Speech on-device transcription with structured error codes
 ```
 
 ## Data Flow
@@ -112,25 +113,39 @@ State is written atomically after every video (write to `.tmp`, then `os.replace
 
 7. **Synchronous, one-at-a-time processing.** Keeps memory and disk bounded. Parallelism can be added later without architectural changes.
 
+## Safety Layers
+
+1. **Preflight check** -- In brief mode, a minimal API call verifies the key and model before the main loop. Skippable with `--no-preflight`.
+2. **Transcript length guard** -- Before each LLM call, an estimated token count is compared against the model's context window (at 80% safe limit). If too long, the video is marked failed with a clear message instead of sending a request that will be rejected.
+3. **Force confirmation** -- `--force` on >10 videos prompts for confirmation unless `--yes` is passed. Non-TTY environments error rather than block.
+4. **Structured error messages** -- The Swift helper exits with distinct codes (2=permission, 3=model not downloaded, 4=runtime failure). The Python layer maps these to actionable instructions.
+5. **Output collision detection** -- Discovery detects stem collisions (e.g., `intro.mp4` and `intro.mov`) and resolves them to `intro.mp4.md` and `intro.mov.md`.
+
 ## CLI Shape
 
 ```
-marginalia extract <course>  [--mode transcript|brief] [--output ...] [--force] [--yes]
-marginalia plan <course>     [--mode transcript|brief]
-marginalia retry <course>    [--mode transcript|brief]
+marginalia extract <course>  [--mode transcript|brief] [--output ...] [--force] [--path ...] [--yes] [--verbose] [--no-preflight]
+marginalia plan <course>     [--mode transcript|brief] [--force] [--path ...]
+marginalia retry <course>    [--mode transcript|brief] [--verbose] [--no-preflight]
 marginalia status <course>
 ```
 
 ## Testing
 
-Tests mock `extract_audio`, `probe_duration`, and `transcribe_local` to avoid ffmpeg and Apple Speech dependencies. The pipeline tests verify:
+Tests mock `extract_audio`, `probe_duration`, `transcribe_local`, and `summarize_transcript` to avoid ffmpeg, Apple Speech, and API dependencies. 60 tests cover:
 
 - Flat and nested folder processing
 - Incremental skip logic (same mode re-run)
 - Cross-mode transcript caching (transcript then brief)
-- Failure isolation (one video fails, others succeed)
+- State consistency under nested operations (US-013 regression)
+- Failure isolation (one video fails, others succeed, no partial .md files)
 - Plan mode (zero side effects)
 - Retry mode (only failed entries)
+- JSONL log creation and structure
+- Force path filtering
+- Output file collision detection
+- Transcript length guard (too-long rejection)
+- Swift helper error message parsing
 
 ```bash
 uv run pytest -v

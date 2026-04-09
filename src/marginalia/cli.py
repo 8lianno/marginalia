@@ -18,8 +18,10 @@ def extract(
     mode: Mode = typer.Option(Mode.TRANSCRIPT, "--mode", "-m", help="Output mode: transcript or brief"),
     model: str = typer.Option("gemini-2.0-flash", "--model", help="LLM model for brief mode"),
     force: bool = typer.Option(False, "--force", help="Bypass skip logic, reprocess everything"),
+    force_path: str | None = typer.Option(None, "--path", help="Restrict --force to a specific video path"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts"),
-    verbose: bool = typer.Option(False, "--verbose", help="Debug output"),
+    verbose: bool = typer.Option(False, "--verbose", help="Show ffmpeg, Swift helper, and LLM details"),
+    no_preflight: bool = typer.Option(False, "--no-preflight", help="Skip API key validation in brief mode"),
 ) -> None:
     """Extract transcripts or structured briefs from course videos."""
     if not course.is_dir():
@@ -30,14 +32,20 @@ def extract(
         print("Error: GEMINI_API_KEY environment variable is required for brief mode", file=sys.stderr)
         raise typer.Exit(1)
 
+    if force_path and not force:
+        print("Error: --path requires --force", file=sys.stderr)
+        raise typer.Exit(1)
+
     config = PipelineConfig(
         input_dir=course.resolve(),
         output_dir=output.resolve(),
         mode=mode,
         model=model,
         force=force,
+        force_path=force_path,
         yes=yes,
         verbose=verbose,
+        no_preflight=no_preflight,
     )
 
     from marginalia.pipeline import run
@@ -53,6 +61,7 @@ def plan(
     mode: Mode = typer.Option(Mode.TRANSCRIPT, "--mode", "-m", help="Output mode to plan"),
     model: str = typer.Option("gemini-2.0-flash", "--model", help="LLM model for brief mode"),
     force: bool = typer.Option(False, "--force", help="Show what force would reprocess"),
+    force_path: str | None = typer.Option(None, "--path", help="Restrict plan to a specific video path"),
 ) -> None:
     """Preview what would be processed without making changes."""
     if not course.is_dir():
@@ -65,6 +74,7 @@ def plan(
         mode=mode,
         model=model,
         force=force,
+        force_path=force_path,
     )
 
     from marginalia.pipeline import run_plan
@@ -78,7 +88,8 @@ def retry(
     output: Path = typer.Option(Path("marginalia"), "--output", "-o", help="Output directory"),
     mode: Mode = typer.Option(Mode.TRANSCRIPT, "--mode", "-m", help="Mode to retry failures in"),
     model: str = typer.Option("gemini-2.0-flash", "--model", help="LLM model for brief mode"),
-    verbose: bool = typer.Option(False, "--verbose", help="Debug output"),
+    verbose: bool = typer.Option(False, "--verbose", help="Show debug details"),
+    no_preflight: bool = typer.Option(False, "--no-preflight", help="Skip API key validation"),
 ) -> None:
     """Retry only previously failed videos."""
     if not course.is_dir():
@@ -95,6 +106,7 @@ def retry(
         mode=mode,
         model=model,
         verbose=verbose,
+        no_preflight=no_preflight,
     )
 
     from marginalia.pipeline import run_retry

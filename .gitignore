@@ -4,5 +4,8 @@ __pycache__/
 dist/
 *.egg-info/
 .env
-.marginalia-state.json
+**/.marginalia-state.json
+**/.marginalia-state.json.tmp
+**/.marginalia-state.json.bak
+**/.logs/
 src/marginalia/swift/transcribe_helper

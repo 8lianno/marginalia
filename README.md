@@ -195,6 +195,10 @@ uv sync --all-extras
 uv run pytest -v
 ```
 
+## Getting started
+
+New to Marginalia? See [GETTING_STARTED.md](GETTING_STARTED.md) for a step-by-step walkthrough from install to Obsidian.
+
 ## License
 
 MIT -- see [LICENSE](LICENSE).

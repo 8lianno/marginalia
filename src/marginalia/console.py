@@ -101,16 +101,32 @@ def confirm(message: str) -> bool:
 
 # --- Progress bar ---
 
+# Per-video fraction budgets
+_EXTRACT_FRACTION = 0.05      # 5% for audio extraction (fast)
+_TRANSCRIBE_CAP = 0.90        # heartbeats fill up to 90%
+_HEARTBEAT_INCREMENT = 0.005  # each heartbeat advances ~0.5%
+
 
 class ProgressTracker:
-    """Dynamic progress bar with ETA using rich. Thread-safe.
+    """Dynamic progress bar with fractional per-video progress and ETA.
 
-    Falls back to plain text in non-TTY / NO_COLOR environments.
+    Each video is worth 1.0 in the total. Stages advance fractionally:
+      - Audio extraction done  → 0.05
+      - Each transcription heartbeat → +0.005 (up to 0.90)
+      - Video complete → snap to 1.0
+
+    This way the bar moves visibly during long transcriptions instead
+    of sitting at 0% until the first video finishes.
+
+    Thread-safe. Falls back to plain text in non-TTY / NO_COLOR.
     """
 
     def __init__(self, total: int):
         self._total = total
         self._use_rich = sys.stderr.isatty() and not os.environ.get("NO_COLOR")
+        # Per-video fractional progress (0.0 to 1.0)
+        self._video_progress: dict[str, float] = {}
+        self._vlock = threading.Lock()
 
         if self._use_rich:
             self._console = Console(stderr=True)
@@ -126,12 +142,26 @@ class ProgressTracker:
                 console=self._console,
                 transient=False,
             )
-            self._task = self._progress.add_task("Starting...", total=total)
+            self._task = self._progress.add_task("Starting...", total=float(total))
             self._progress.start()
         else:
             self._progress = None
             self._task = None
             self._completed = 0
+
+    def _advance_to(self, video: str, fraction: float) -> None:
+        """Advance a video's progress to the given fraction (0.0-1.0).
+        Only moves forward, never backward. Thread-safe."""
+        with self._vlock:
+            old = self._video_progress.get(video, 0.0)
+            new = min(fraction, 1.0)
+            delta = new - old
+            if delta <= 0:
+                return
+            self._video_progress[video] = new
+
+        if self._progress:
+            self._progress.update(self._task, advance=delta)
 
     def update(self, video: str, stage_name: str) -> None:
         """Update the progress bar description with the current video and stage."""
@@ -141,32 +171,34 @@ class ProgressTracker:
         else:
             _print(f"  [{stage_name}] {video}")
 
-    def advance(self, video: str, detail: str = "") -> None:
-        """Mark one video as complete and advance the bar."""
+    def mark_extracted(self, video: str) -> None:
+        """Audio extraction done — advance to 5%."""
+        self._advance_to(video, _EXTRACT_FRACTION)
+
+    def heartbeat(self, video: str) -> None:
+        """Transcription heartbeat — advance by a small increment, capped at 90%."""
+        with self._vlock:
+            current = self._video_progress.get(video, 0.0)
+        target = min(current + _HEARTBEAT_INCREMENT, _TRANSCRIBE_CAP)
+        self._advance_to(video, target)
+
+    def complete(self, video: str, detail: str = "") -> None:
+        """Video fully done — snap to 1.0 and log success."""
+        self._advance_to(video, 1.0)
         suffix = f" ({detail})" if detail else ""
         if self._progress:
-            self._progress.update(self._task, advance=1)
             self._progress.console.print(f"  [green]+ done: {video}{suffix}[/green]")
         else:
             self._completed += 1
             _print(f"  {_c(_GREEN, f'+ done: {video}{suffix}')}")
 
-    def log_failure(self, video: str, reason: str) -> None:
-        """Print a failure message above the progress bar."""
+    def fail(self, video: str, reason: str) -> None:
+        """Video failed — snap to 1.0 (keeps ETA accurate) and log error."""
+        self._advance_to(video, 1.0)
         if self._progress:
             self._progress.console.print(f"  [red]x failed: {video} -- {reason}[/red]")
         else:
             _print(f"  {_c(_RED, f'x failed: {video} -- {reason}')}")
-
-    def pulse(self) -> None:
-        """Visual heartbeat — indicates the current task is still alive.
-
-        In rich mode this triggers a spinner tick. In plain mode it's a no-op
-        (we don't want to spam dots in CI logs).
-        """
-        if self._progress:
-            # Touching the task description triggers a refresh of the spinner
-            self._progress.update(self._task)
 
     def log(self, message: str) -> None:
         """Print a message above the progress bar."""

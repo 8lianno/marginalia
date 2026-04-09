@@ -246,10 +246,9 @@ def _run_one(
             result.total_cost_usd += cost
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        tracker.log_failure(video.relative, str(e))
+        tracker.fail(video.relative, str(e))
         logger.video_failure(video.relative, config.mode.value, error_msg, exc=e)
         _record_failure(config, state, video, error_msg)
-        tracker.advance(video.relative)  # advance bar even on failure so ETA stays accurate
         with _state_lock:
             result.failed += 1
             result.errors.append((video.relative, error_msg))
@@ -403,10 +402,13 @@ def _do_transcript(
     logger.video_stage(rel, "extracting_audio")
     with tempfile.TemporaryDirectory() as tmp_dir:
         audio_path = extract_audio(video.path, Path(tmp_dir))
+        tracker.mark_extracted(rel)
 
         tracker.update(rel, "Transcribing")
         logger.video_stage(rel, "transcribing")
-        transcript_text = transcribe_local(audio_path, on_heartbeat=tracker.pulse)
+        transcript_text = transcribe_local(
+            audio_path, on_heartbeat=lambda: tracker.heartbeat(rel)
+        )
 
     meta = TranscriptMeta(
         source=rel,
@@ -423,7 +425,7 @@ def _do_transcript(
     with _state_lock:
         entry.transcript = ModeState(status=VideoStatus.COMPLETED, processed_at=now)
     save_state(config.output_dir, state)
-    tracker.advance(rel)
+    tracker.complete(rel)
     logger.video_success(rel, "transcript")
     return 0.0
 
@@ -495,7 +497,7 @@ def _do_brief(
             cost_usd=cost_usd,
         )
     save_state(config.output_dir, state)
-    tracker.advance(rel, ", ".join(detail_parts))
+    tracker.complete(rel, ", ".join(detail_parts))
     logger.video_success(rel, "brief", cost_usd)
     return cost_usd
 
@@ -516,9 +518,13 @@ def _fresh_transcribe(
     logger.video_stage(video.relative, "extracting_audio")
     with tempfile.TemporaryDirectory() as tmp_dir:
         audio_path = extract_audio(video.path, Path(tmp_dir))
+        tracker.mark_extracted(video.relative)
+
         tracker.update(video.relative, "Transcribing")
         logger.video_stage(video.relative, "transcribing")
-        transcript_text = transcribe_local(audio_path, on_heartbeat=tracker.pulse)
+        transcript_text = transcribe_local(
+            audio_path, on_heartbeat=lambda: tracker.heartbeat(video.relative)
+        )
 
     transcript_meta = TranscriptMeta(
         source=video.relative,

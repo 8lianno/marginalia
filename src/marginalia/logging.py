@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 class RunLogger:
-    """Writes structured JSONL log entries for a single run."""
+    """Writes structured JSONL log entries for a single run. Thread-safe."""
 
     def __init__(self, output_dir: Path):
         self._log_dir = output_dir / ".logs"
@@ -15,6 +16,7 @@ class RunLogger:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self._path = self._log_dir / f"run-{ts}.jsonl"
         self._file = open(self._path, "a")
+        self._lock = threading.Lock()
 
     def _write(self, event: str, **fields: object) -> None:
         entry = {
@@ -22,8 +24,10 @@ class RunLogger:
             "event": event,
             **fields,
         }
-        self._file.write(json.dumps(entry, default=str) + "\n")
-        self._file.flush()
+        line = json.dumps(entry, default=str) + "\n"
+        with self._lock:
+            self._file.write(line)
+            self._file.flush()
 
     def run_start(self, mode: str, video_count: int, **extra: object) -> None:
         self._write("run_start", mode=mode, video_count=video_count, **extra)

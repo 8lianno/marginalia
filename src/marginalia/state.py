@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 from marginalia.models import Mode, ModeState, RunState, VideoFile, VideoState, VideoStatus
 
 STATE_FILENAME = ".marginalia-state.json"
+
+# Module-level lock: protects state mutations + disk writes together.
+# Any code that mutates a RunState AND calls save_state must hold this lock.
+_state_lock = threading.Lock()
 
 
 def state_path(output_dir: Path) -> Path:
@@ -33,22 +38,21 @@ def load_state(output_dir: Path) -> RunState:
 
 
 def save_state(output_dir: Path, state: RunState) -> None:
-    """Atomically write state to disk."""
-    path = state_path(output_dir)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state.model_dump(mode="json"), indent=2) + "\n")
-    os.replace(tmp, path)
+    """Atomically write state to disk. Thread-safe."""
+    with _state_lock:
+        path = state_path(output_dir)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state.model_dump(mode="json"), indent=2) + "\n")
+        os.replace(tmp, path)
 
 
 def get_mode_state(entry: VideoState, mode: Mode) -> ModeState | None:
-    """Get the ModeState for a given mode from a VideoState entry."""
     if mode == Mode.TRANSCRIPT:
         return entry.transcript
     return entry.brief
 
 
 def is_changed(video: VideoFile, state: RunState) -> bool:
-    """Return True if the video is new or its fingerprint differs from stored state."""
     entry = state.videos.get(video.relative)
     if entry is None:
         return True
@@ -56,13 +60,11 @@ def is_changed(video: VideoFile, state: RunState) -> bool:
 
 
 def needs_processing(video: VideoFile, state: RunState, mode: Mode, force: bool = False) -> bool:
-    """Determine whether a video needs processing in the given mode."""
     if force:
         return True
     entry = state.videos.get(video.relative)
     if entry is None:
         return True
-    # Fingerprint changed — invalidates both modes
     if entry.fingerprint != video.fingerprint:
         return True
     ms = get_mode_state(entry, mode)
@@ -74,7 +76,6 @@ def needs_processing(video: VideoFile, state: RunState, mode: Mode, force: bool 
 def get_failed_videos(
     state: RunState, mode: Mode, input_dir: Path
 ) -> list[VideoFile]:
-    """Return VideoFile entries for videos that failed in the given mode."""
     failed: list[VideoFile] = []
     for rel, entry in state.videos.items():
         ms = get_mode_state(entry, mode)
@@ -95,7 +96,6 @@ def get_failed_videos(
 
 
 def has_cached_transcript(video_relative: str, state: RunState) -> bool:
-    """Check if a video has a completed transcript in state."""
     entry = state.videos.get(video_relative)
     if entry is None:
         return False

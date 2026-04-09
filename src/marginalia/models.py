@@ -92,3 +92,4 @@ class PipelineConfig(BaseModel):
     yes: bool = False
     verbose: bool = False
     no_preflight: bool = False
+    concurrency: int = 1

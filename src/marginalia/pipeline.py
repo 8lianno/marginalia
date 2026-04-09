@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ from marginalia.models import (
     VideoStatus,
 )
 from marginalia.state import (
+    _state_lock,
     get_failed_videos,
     has_cached_transcript,
     load_state,
@@ -62,7 +65,6 @@ def run(config: PipelineConfig) -> RunResult:
 
     # 3. Filter to videos needing work in current mode
     if config.force and config.force_path:
-        # Force only the specified path
         to_process = [v for v in videos if v.relative == config.force_path]
         if not to_process:
             console.info(f"No video found matching path: {config.force_path}")
@@ -92,21 +94,22 @@ def run(config: PipelineConfig) -> RunResult:
     total_duration = sum(v.duration_seconds or 0.0 for v in to_process)
     cost_est = estimate_cost(to_process, config.mode)
 
-    # Count cached transcripts for brief mode
     cached_count = 0
     if config.mode == Mode.BRIEF:
         cached_count = sum(1 for v in to_process if has_cached_transcript(v.relative, state))
 
     engine = "apple-speech"
+    workers = min(config.concurrency, len(to_process))
+    concurrency_tag = f" . workers: {workers}" if workers > 1 else ""
     console.header(
         f"{len(to_process)} videos . {format_duration(total_duration)} . "
         f"mode: {config.mode.value} . engine: {engine} . "
-        f"est. cost: ${cost_est.estimated_cost_usd:.2f}"
+        f"est. cost: ${cost_est.estimated_cost_usd:.2f}{concurrency_tag}"
     )
     if config.mode == Mode.BRIEF and cached_count:
         console.info(f"Transcripts cached: {cached_count}/{len(to_process)}")
 
-    # Force confirmation for large runs
+    # Force confirmation
     if config.force and len(to_process) > 10 and not config.yes:
         if not console.confirm(
             f"Force mode: {len(to_process)} videos will be reprocessed "
@@ -136,22 +139,12 @@ def run(config: PipelineConfig) -> RunResult:
         video_count=len(to_process),
         total_duration=total_duration,
         estimated_cost=cost_est.estimated_cost_usd,
+        concurrency=workers,
     )
 
-    # 6. Process each video
+    # 6. Process videos — parallel or sequential
     total = len(to_process)
-    for i, video in enumerate(to_process, 1):
-        try:
-            cost = _process_single(config, state, video, i, total, logger)
-            result.processed += 1
-            result.total_cost_usd += cost
-        except Exception as e:
-            error_msg = f"{type(e).__name__}: {e}"
-            console.failure(video.relative, str(e))
-            logger.video_failure(video.relative, config.mode.value, error_msg, exc=e)
-            _record_failure(config, state, video, error_msg)
-            result.failed += 1
-            result.errors.append((video.relative, error_msg))
+    result = _process_batch(config, state, to_process, total, logger, workers, result)
 
     elapsed = format_duration(time.monotonic() - start_time)
     console.summary(result.processed, result.skipped, result.failed, elapsed, result.total_cost_usd)
@@ -174,14 +167,14 @@ def run_retry(config: PipelineConfig, mode: Mode) -> RunResult:
         console.info(f"No failed videos to retry in {mode.value} mode")
         return result
 
-    # Re-probe durations for videos that may not have been probed before
     for v in to_retry:
         if v.duration_seconds is None:
             v.duration_seconds = probe_duration(v.path)
 
-    console.header(f"Retrying {len(to_retry)} previously failed videos in {mode.value} mode...")
+    workers = min(config.concurrency, len(to_retry))
+    concurrency_tag = f" (workers: {workers})" if workers > 1 else ""
+    console.header(f"Retrying {len(to_retry)} previously failed videos in {mode.value} mode...{concurrency_tag}")
 
-    # Preflight for brief mode
     if mode == Mode.BRIEF and not config.no_preflight:
         try:
             preflight_check(config.model)
@@ -192,29 +185,73 @@ def run_retry(config: PipelineConfig, mode: Mode) -> RunResult:
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     logger = RunLogger(config.output_dir)
-    logger.run_start(mode=mode.value, video_count=len(to_retry), retry=True)
+    logger.run_start(mode=mode.value, video_count=len(to_retry), retry=True, concurrency=workers)
 
     retry_config = config.model_copy(update={"mode": mode})
 
     total = len(to_retry)
-    for i, video in enumerate(to_retry, 1):
-        try:
-            cost = _process_single(retry_config, state, video, i, total, logger)
-            result.processed += 1
-            result.total_cost_usd += cost
-        except Exception as e:
-            error_msg = f"{type(e).__name__}: {e}"
-            console.failure(video.relative, str(e))
-            logger.video_failure(video.relative, mode.value, error_msg, exc=e)
-            _record_failure(retry_config, state, video, error_msg)
-            result.failed += 1
-            result.errors.append((video.relative, error_msg))
+    result = _process_batch(retry_config, state, to_retry, total, logger, workers, result)
 
     elapsed = format_duration(time.monotonic() - start_time)
     console.summary(result.processed, result.skipped, result.failed, elapsed, result.total_cost_usd)
     logger.run_end(result.processed, result.skipped, result.failed, elapsed, result.total_cost_usd)
     logger.close()
     return result
+
+
+def _process_batch(
+    config: PipelineConfig,
+    state: RunState,
+    videos: list[VideoFile],
+    total: int,
+    logger: RunLogger,
+    workers: int,
+    result: RunResult,
+) -> RunResult:
+    """Process a list of videos, either sequentially or in parallel."""
+    if workers <= 1:
+        # Sequential — same as before, no thread overhead
+        for i, video in enumerate(videos, 1):
+            _run_one(config, state, video, i, total, logger, result)
+    else:
+        # Parallel via ThreadPoolExecutor
+        # Each video gets a fixed slot number for console output
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_run_one, config, state, video, i, total, logger, result): video
+                for i, video in enumerate(videos, 1)
+            }
+            # Wait for all to complete (results collected via shared `result`)
+            for future in as_completed(futures):
+                # Exceptions inside _run_one are caught internally,
+                # but propagate unexpected ones here as a safety net.
+                future.result()
+    return result
+
+
+def _run_one(
+    config: PipelineConfig,
+    state: RunState,
+    video: VideoFile,
+    index: int,
+    total: int,
+    logger: RunLogger,
+    result: RunResult,
+) -> None:
+    """Process a single video with error isolation. Updates `result` in place (thread-safe)."""
+    try:
+        cost = _process_single(config, state, video, index, total, logger)
+        with _state_lock:
+            result.processed += 1
+            result.total_cost_usd += cost
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        console.failure(video.relative, str(e))
+        logger.video_failure(video.relative, config.mode.value, error_msg, exc=e)
+        _record_failure(config, state, video, error_msg)
+        with _state_lock:
+            result.failed += 1
+            result.errors.append((video.relative, error_msg))
 
 
 def run_plan(config: PipelineConfig) -> RunResult:
@@ -235,7 +272,6 @@ def run_plan(config: PipelineConfig) -> RunResult:
     else:
         to_process = [v for v in videos if needs_processing(v, state, config.mode)]
 
-    # Probe durations
     for v in to_process:
         if v.duration_seconds is None:
             v.duration_seconds = probe_duration(v.path)
@@ -307,6 +343,9 @@ def run_status(config: PipelineConfig) -> None:
             console.info(f"  - {rel} ({mode}) -- {error}")
 
 
+# --- Per-video processing (called from threads) ---
+
+
 def _process_single(
     config: PipelineConfig,
     state: RunState,
@@ -315,35 +354,35 @@ def _process_single(
     total: int,
     logger: RunLogger,
 ) -> float:
-    """Process a single video. Returns cost_usd for this video."""
+    """Process a single video. Returns cost_usd. Thread-safe."""
     rel = video.relative
     now = datetime.now(timezone.utc).isoformat()
-    cost_usd = 0.0
 
-    # Ensure video state entry exists
-    if rel not in state.videos:
-        state.videos[rel] = VideoState(fingerprint=video.fingerprint)
-    entry = state.videos[rel]
+    # State mutations are protected by _state_lock
+    with _state_lock:
+        if rel not in state.videos:
+            state.videos[rel] = VideoState(fingerprint=video.fingerprint)
+        entry = state.videos[rel]
 
-    # Update fingerprint if changed (invalidates both modes)
-    if entry.fingerprint != video.fingerprint:
-        entry.fingerprint = video.fingerprint
-        entry.transcript = None
-        entry.brief = None
+        if entry.fingerprint != video.fingerprint:
+            entry.fingerprint = video.fingerprint
+            entry.transcript = None
+            entry.brief = None
 
-    # Probe duration if needed
     if video.duration_seconds is None:
         console.stage(index, total, "Probing", rel)
         logger.video_stage(rel, "probing")
         video.duration_seconds = probe_duration(video.path)
-    entry.duration_seconds = video.duration_seconds
+        with _state_lock:
+            entry.duration_seconds = video.duration_seconds
+    else:
+        with _state_lock:
+            entry.duration_seconds = video.duration_seconds
 
     if config.mode == Mode.TRANSCRIPT:
-        cost_usd = _do_transcript(config, state, entry, video, index, total, now, logger)
+        return _do_transcript(config, state, entry, video, index, total, now, logger)
     else:
-        cost_usd = _do_brief(config, state, entry, video, index, total, now, logger)
-
-    return cost_usd
+        return _do_brief(config, state, entry, video, index, total, now, logger)
 
 
 def _do_transcript(
@@ -356,7 +395,6 @@ def _do_transcript(
     now: str,
     logger: RunLogger,
 ) -> float:
-    """Run transcript mode for a single video."""
     rel = video.relative
 
     console.stage(index, total, "Extracting audio", rel)
@@ -380,7 +418,8 @@ def _do_transcript(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown)
 
-    entry.transcript = ModeState(status=VideoStatus.COMPLETED, processed_at=now)
+    with _state_lock:
+        entry.transcript = ModeState(status=VideoStatus.COMPLETED, processed_at=now)
     save_state(config.output_dir, state)
     console.success(rel)
     logger.video_success(rel, "transcript")
@@ -397,12 +436,14 @@ def _do_brief(
     now: str,
     logger: RunLogger,
 ) -> float:
-    """Run brief mode for a single video. Transcribes first if needed."""
     rel = video.relative
     detail_parts = []
 
     # Step 1: Get transcript (from cache or fresh)
-    if entry.transcript and entry.transcript.status == VideoStatus.COMPLETED:
+    with _state_lock:
+        has_transcript = entry.transcript and entry.transcript.status == VideoStatus.COMPLETED
+
+    if has_transcript:
         transcript_path = config.output_dir / video.md_relative
         if transcript_path.exists():
             transcript_text = _extract_transcript_body(transcript_path.read_text())
@@ -417,7 +458,7 @@ def _do_brief(
     if not transcript_text.strip():
         raise RuntimeError("Transcript is empty — cannot generate brief")
 
-    # Step 2: Call LLM to produce brief
+    # Step 2: Call LLM
     console.stage(index, total, "Generating brief", rel)
     logger.video_stage(rel, "generating_brief")
     duration_str = format_duration(video.duration_seconds or 0.0)
@@ -445,12 +486,13 @@ def _do_brief(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown)
 
-    entry.brief = ModeState(
-        status=VideoStatus.COMPLETED,
-        processed_at=now,
-        model=config.model,
-        cost_usd=cost_usd,
-    )
+    with _state_lock:
+        entry.brief = ModeState(
+            status=VideoStatus.COMPLETED,
+            processed_at=now,
+            model=config.model,
+            cost_usd=cost_usd,
+        )
     save_state(config.output_dir, state)
     console.success(rel, ", ".join(detail_parts))
     logger.video_success(rel, "brief", cost_usd)
@@ -467,7 +509,7 @@ def _fresh_transcribe(
     now: str,
     logger: RunLogger,
 ) -> str:
-    """Extract audio and transcribe locally, updating the live state object."""
+    """Extract audio and transcribe locally. Thread-safe state updates."""
     console.stage(index, total, "Extracting audio", video.relative)
     logger.video_stage(video.relative, "extracting_audio")
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -476,7 +518,6 @@ def _fresh_transcribe(
         logger.video_stage(video.relative, "transcribing")
         transcript_text = transcribe_local(audio_path)
 
-    # Save transcript output so it can be reused later
     transcript_meta = TranscriptMeta(
         source=video.relative,
         fingerprint=video.fingerprint,
@@ -488,14 +529,13 @@ def _fresh_transcribe(
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(transcript_md)
 
-    # US-013 fix: update the LIVE state object, not a stale reload from disk
-    entry.transcript = ModeState(status=VideoStatus.COMPLETED, processed_at=now)
+    with _state_lock:
+        entry.transcript = ModeState(status=VideoStatus.COMPLETED, processed_at=now)
     save_state(config.output_dir, state)
     return transcript_text
 
 
 def _extract_transcript_body(markdown: str) -> str:
-    """Extract the body text from a transcript markdown file (strip frontmatter and title)."""
     if markdown.startswith("---"):
         end = markdown.find("---", 3)
         if end != -1:
@@ -505,23 +545,23 @@ def _extract_transcript_body(markdown: str) -> str:
 
 
 def _record_failure(config: PipelineConfig, state: RunState, video: VideoFile, error_msg: str) -> None:
-    """Record a failure in the state file."""
     now = datetime.now(timezone.utc).isoformat()
     rel = video.relative
 
-    if rel not in state.videos:
-        state.videos[rel] = VideoState(fingerprint=video.fingerprint)
-    entry = state.videos[rel]
-    entry.duration_seconds = video.duration_seconds
+    with _state_lock:
+        if rel not in state.videos:
+            state.videos[rel] = VideoState(fingerprint=video.fingerprint)
+        entry = state.videos[rel]
+        entry.duration_seconds = video.duration_seconds
 
-    mode_state = ModeState(
-        status=VideoStatus.FAILED,
-        error=error_msg,
-        processed_at=now,
-    )
-    if config.mode == Mode.TRANSCRIPT:
-        entry.transcript = mode_state
-    else:
-        entry.brief = mode_state
+        mode_state = ModeState(
+            status=VideoStatus.FAILED,
+            error=error_msg,
+            processed_at=now,
+        )
+        if config.mode == Mode.TRANSCRIPT:
+            entry.transcript = mode_state
+        else:
+            entry.brief = mode_state
 
     save_state(config.output_dir, state)

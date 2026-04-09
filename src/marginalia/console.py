@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 
 # ANSI color codes
 _GREEN = "\033[32m"
@@ -11,20 +12,25 @@ _BOLD = "\033[1m"
 _RESET = "\033[0m"
 
 _verbose = False
+_lock = threading.Lock()
 
 
 def _use_color() -> bool:
-    """Check if color output should be used."""
     if os.environ.get("NO_COLOR"):
         return False
     return sys.stderr.isatty()
 
 
 def _c(code: str, text: str) -> str:
-    """Wrap text in ANSI code if color is enabled."""
     if _use_color():
         return f"{code}{text}{_RESET}"
     return text
+
+
+def _print(msg: str) -> None:
+    """Thread-safe print to stderr."""
+    with _lock:
+        print(msg, file=sys.stderr)
 
 
 def set_verbose(enabled: bool) -> None:
@@ -34,36 +40,36 @@ def set_verbose(enabled: bool) -> None:
 
 def verbose(message: str) -> None:
     if _verbose:
-        print(f"  [verbose] {message}", file=sys.stderr)
+        _print(f"  [verbose] {message}")
 
 
 def stage(index: int, total: int, stage_name: str, video_relative: str) -> None:
-    print(f"  [{index}/{total}] {stage_name}... {video_relative}", file=sys.stderr)
+    _print(f"  [{index}/{total}] {stage_name}... {video_relative}")
 
 
 def skip(video_relative: str, mode: str) -> None:
-    print(f"  {_c(_YELLOW, f'- skipped: {video_relative} (already in {mode} mode)')}", file=sys.stderr)
+    _print(f"  {_c(_YELLOW, f'- skipped: {video_relative} (already in {mode} mode)')}")
 
 
 def success(video_relative: str, detail: str = "") -> None:
     suffix = f" ({detail})" if detail else ""
-    print(f"  {_c(_GREEN, f'+ done: {video_relative}{suffix}')}", file=sys.stderr)
+    _print(f"  {_c(_GREEN, f'+ done: {video_relative}{suffix}')}")
 
 
 def failure(video_relative: str, reason: str) -> None:
-    print(f"  {_c(_RED, f'x failed: {video_relative} -- {reason}')}", file=sys.stderr)
+    _print(f"  {_c(_RED, f'x failed: {video_relative} -- {reason}')}")
 
 
 def header(message: str) -> None:
-    print(f"\n{_c(_BOLD, message)}", file=sys.stderr)
+    _print(f"\n{_c(_BOLD, message)}")
 
 
 def info(message: str) -> None:
-    print(f"  {message}", file=sys.stderr)
+    _print(f"  {message}")
 
 
 def warning(message: str) -> None:
-    print(f"  {_c(_YELLOW, f'Warning: {message}')}", file=sys.stderr)
+    _print(f"  {_c(_YELLOW, f'Warning: {message}')}")
 
 
 def summary(processed: int, skipped: int, failed: int, wall_clock: str, cost_usd: float = 0.0) -> None:
@@ -76,15 +82,15 @@ def summary(processed: int, skipped: int, failed: int, wall_clock: str, cost_usd
         parts.append(_c(_RED, f"Failed: {failed}"))
     line = ", ".join(parts) if parts else "Nothing to do"
     cost_str = f" -- cost: ${cost_usd:.2f}" if cost_usd > 0 else " -- cost: $0.00"
-    print(f"\n{_c(_BOLD, 'Done.')} {line} in {wall_clock}{cost_str}", file=sys.stderr)
+    _print(f"\n{_c(_BOLD, 'Done.')} {line} in {wall_clock}{cost_str}")
     if failed:
-        print(f"  Run 'marginalia retry' to reprocess failed videos.", file=sys.stderr)
+        _print(f"  Run 'marginalia retry' to reprocess failed videos.")
 
 
 def confirm(message: str) -> bool:
-    """Prompt the user for confirmation. Returns False in non-TTY environments."""
     if not sys.stdin.isatty():
-        print(f"  {message} (non-interactive, use --yes to skip)", file=sys.stderr)
+        _print(f"  {message} (non-interactive, use --yes to skip)")
         return False
-    response = input(f"  {message} [y/N] ").strip().lower()
+    with _lock:
+        response = input(f"  {message} [y/N] ").strip().lower()
     return response in ("y", "yes")

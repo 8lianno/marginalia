@@ -352,3 +352,172 @@ def test_force_path_filter(mock_probe, mock_extract, mock_transcribe, tmp_path: 
 
     assert result.processed == 1
     assert mock_transcribe.call_count == 1
+
+
+# --- Parallel processing ---
+
+@patch("marginalia.pipeline.transcribe_local")
+@patch("marginalia.pipeline.extract_audio")
+@patch("marginalia.pipeline.probe_duration")
+def test_parallel_transcript_mode(mock_probe, mock_extract, mock_transcribe, tmp_path: Path):
+    """Parallel processing produces the same results as sequential."""
+    course = _make_course(tmp_path, 6)
+    output = tmp_path / "output"
+
+    mock_probe.return_value = 60.0
+
+    def fake_extract(video_path, output_dir):
+        audio = output_dir / "audio.wav"
+        audio.write_bytes(b"\x00" * 30)
+        return audio
+
+    mock_extract.side_effect = fake_extract
+    mock_transcribe.return_value = "Parallel transcript."
+
+    config = PipelineConfig(
+        input_dir=course, output_dir=output, mode=Mode.TRANSCRIPT,
+        concurrency=3,
+    )
+    result = run(config)
+
+    assert result.processed == 6
+    assert result.skipped == 0
+    assert result.failed == 0
+    # All 6 output files exist
+    for i in range(1, 7):
+        assert (output / f"lesson{i}.md").exists()
+    # State file has all 6 entries
+    state = load_state(output)
+    assert len(state.videos) == 6
+    for entry in state.videos.values():
+        assert entry.transcript is not None
+        assert entry.transcript.status == VideoStatus.COMPLETED
+
+
+@patch("marginalia.pipeline.transcribe_local")
+@patch("marginalia.pipeline.extract_audio")
+@patch("marginalia.pipeline.probe_duration")
+def test_parallel_failure_isolation(mock_probe, mock_extract, mock_transcribe, tmp_path: Path):
+    """Failures in parallel mode don't block other workers."""
+    course = _make_course(tmp_path, 5)
+    output = tmp_path / "output"
+
+    mock_probe.return_value = 60.0
+
+    import threading
+    call_counter = {"n": 0}
+    counter_lock = threading.Lock()
+
+    def fake_extract(video_path, output_dir):
+        with counter_lock:
+            call_counter["n"] += 1
+            n = call_counter["n"]
+        # Fail the 2nd and 4th calls
+        if n in (2, 4):
+            raise RuntimeError(f"ffmpeg exploded on call {n}")
+        audio = output_dir / "audio.wav"
+        audio.write_bytes(b"\x00" * 30)
+        return audio
+
+    mock_extract.side_effect = fake_extract
+    mock_transcribe.return_value = "Transcript."
+
+    config = PipelineConfig(
+        input_dir=course, output_dir=output, mode=Mode.TRANSCRIPT,
+        concurrency=3,
+    )
+    result = run(config)
+
+    assert result.processed == 3
+    assert result.failed == 2
+    # State has the right mix of completed and failed
+    state = load_state(output)
+    completed = sum(
+        1 for e in state.videos.values()
+        if e.transcript and e.transcript.status == VideoStatus.COMPLETED
+    )
+    failed = sum(
+        1 for e in state.videos.values()
+        if e.transcript and e.transcript.status == VideoStatus.FAILED
+    )
+    assert completed == 3
+    assert failed == 2
+
+
+@patch("marginalia.pipeline.transcribe_local")
+@patch("marginalia.pipeline.extract_audio")
+@patch("marginalia.pipeline.probe_duration")
+def test_parallel_incremental_skip(mock_probe, mock_extract, mock_transcribe, tmp_path: Path):
+    """Incremental skips work correctly after a parallel run."""
+    course = _make_course(tmp_path, 4)
+    output = tmp_path / "output"
+
+    mock_probe.return_value = 60.0
+
+    def fake_extract(video_path, output_dir):
+        audio = output_dir / "audio.wav"
+        audio.write_bytes(b"\x00" * 30)
+        return audio
+
+    mock_extract.side_effect = fake_extract
+    mock_transcribe.return_value = "Transcript."
+
+    # First run: parallel
+    config = PipelineConfig(
+        input_dir=course, output_dir=output, mode=Mode.TRANSCRIPT,
+        concurrency=2,
+    )
+    result1 = run(config)
+    assert result1.processed == 4
+
+    # Second run: should skip all
+    mock_transcribe.reset_mock()
+    result2 = run(config)
+    assert result2.skipped == 4
+    assert result2.processed == 0
+    mock_transcribe.assert_not_called()
+
+
+@patch("marginalia.pipeline.summarize_transcript")
+@patch("marginalia.pipeline.transcribe_local")
+@patch("marginalia.pipeline.extract_audio")
+@patch("marginalia.pipeline.probe_duration")
+def test_parallel_brief_with_cached_transcripts(mock_probe, mock_extract, mock_transcribe, mock_summarize, tmp_path: Path):
+    """Parallel brief mode reuses cached transcripts correctly."""
+    course = _make_course(tmp_path, 4)
+    output = tmp_path / "output"
+
+    mock_probe.return_value = 60.0
+
+    def fake_extract(video_path, output_dir):
+        audio = output_dir / "audio.wav"
+        audio.write_bytes(b"\x00" * 30)
+        return audio
+
+    mock_extract.side_effect = fake_extract
+    mock_transcribe.return_value = "Some transcript."
+    mock_summarize.return_value = ("## Core Idea\nStuff", 50, 25, 0.001)
+
+    # First: transcript mode (sequential)
+    config_t = PipelineConfig(input_dir=course, output_dir=output, mode=Mode.TRANSCRIPT)
+    run(config_t)
+
+    # Brief mode in parallel — should reuse all transcripts
+    mock_transcribe.reset_mock()
+    mock_extract.reset_mock()
+
+    config_b = PipelineConfig(
+        input_dir=course, output_dir=output, mode=Mode.BRIEF,
+        no_preflight=True, concurrency=2,
+    )
+    result = run(config_b)
+
+    assert result.processed == 4
+    mock_transcribe.assert_not_called()
+    mock_extract.assert_not_called()
+    assert mock_summarize.call_count == 4
+
+    state = load_state(output)
+    for entry in state.videos.values():
+        assert entry.brief is not None
+        assert entry.brief.status == VideoStatus.COMPLETED

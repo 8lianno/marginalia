@@ -22,6 +22,7 @@ def extract(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts"),
     verbose: bool = typer.Option(False, "--verbose", help="Show ffmpeg, Swift helper, and LLM details"),
     no_preflight: bool = typer.Option(False, "--no-preflight", help="Skip API key validation in brief mode"),
+    concurrency: int = typer.Option(1, "--concurrency", "-j", help="Number of videos to process in parallel"),
 ) -> None:
     """Extract transcripts or structured briefs from course videos."""
     if not course.is_dir():
@@ -36,6 +37,10 @@ def extract(
         print("Error: --path requires --force", file=sys.stderr)
         raise typer.Exit(1)
 
+    if concurrency < 1:
+        print("Error: --concurrency must be at least 1", file=sys.stderr)
+        raise typer.Exit(1)
+
     config = PipelineConfig(
         input_dir=course.resolve(),
         output_dir=output.resolve(),
@@ -46,6 +51,7 @@ def extract(
         yes=yes,
         verbose=verbose,
         no_preflight=no_preflight,
+        concurrency=concurrency,
     )
 
     from marginalia.pipeline import run
@@ -90,6 +96,7 @@ def retry(
     model: str = typer.Option("gemini-2.0-flash", "--model", help="LLM model for brief mode"),
     verbose: bool = typer.Option(False, "--verbose", help="Show debug details"),
     no_preflight: bool = typer.Option(False, "--no-preflight", help="Skip API key validation"),
+    concurrency: int = typer.Option(1, "--concurrency", "-j", help="Number of videos to process in parallel"),
 ) -> None:
     """Retry only previously failed videos."""
     if not course.is_dir():
@@ -107,6 +114,7 @@ def retry(
         model=model,
         verbose=verbose,
         no_preflight=no_preflight,
+        concurrency=concurrency,
     )
 
     from marginalia.pipeline import run_retry

@@ -168,7 +168,10 @@ def summarize_transcript(
     # Guard against transcripts that exceed model context
     check_transcript_length(transcript, prompt, model)
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY environment variable is not set")
+    client = genai.Client(api_key=api_key)
 
     full_prompt = f"{prompt}\n\n---\n\nTRANSCRIPT:\n{transcript}"
 

@@ -1,10 +1,31 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Patterns to redact from tracebacks
+_SECRET_ENV_VARS = {"GEMINI_API_KEY"}
+_REDACT_PATTERN = re.compile(
+    r"(GEMINI_API_KEY|api[_-]?key|secret|token|password|credential)\s*[=:]\s*\S+",
+    re.IGNORECASE,
+)
+
+
+def _scrub_traceback(tb_text: str) -> str:
+    """Remove potential secrets and sensitive env var values from a traceback string."""
+    # Redact known secret env var values
+    for var in _SECRET_ENV_VARS:
+        value = os.environ.get(var)
+        if value:
+            tb_text = tb_text.replace(value, "[REDACTED]")
+    # Redact any remaining key=value patterns that look like secrets
+    tb_text = _REDACT_PATTERN.sub(r"\1=[REDACTED]", tb_text)
+    return tb_text
 
 
 class RunLogger:
@@ -41,7 +62,8 @@ class RunLogger:
     def video_failure(self, video: str, mode: str, error: str, exc: BaseException | None = None) -> None:
         tb = None
         if exc is not None:
-            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            raw = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            tb = _scrub_traceback(raw)
         self._write("video_failure", video=video, mode=mode, error=error, traceback=tb)
 
     def run_end(self, processed: int, skipped: int, failed: int, wall_clock: str, cost_usd: float = 0.0) -> None:

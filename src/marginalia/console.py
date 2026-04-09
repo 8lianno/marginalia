@@ -103,8 +103,9 @@ def confirm(message: str) -> bool:
 
 # Per-video fraction budgets
 _EXTRACT_FRACTION = 0.05      # 5% for audio extraction (fast)
-_TRANSCRIBE_CAP = 0.90        # heartbeats fill up to 90%
-_HEARTBEAT_INCREMENT = 0.005  # each heartbeat advances ~0.5%
+_TRANSCRIBE_CAP = 0.90        # heartbeat pacing fills up to 90%
+_HEARTBEAT_INCREMENT = 0.005  # fallback when duration is unknown
+_MIN_HEARTBEAT_SECONDS = 30.0
 
 
 class ProgressTracker:
@@ -112,7 +113,7 @@ class ProgressTracker:
 
     Each video is worth 1.0 in the total. Stages advance fractionally:
       - Audio extraction done  → 0.05
-      - Each transcription heartbeat → +0.005 (up to 0.90)
+      - Transcription heartbeats pace toward 0.90 using video duration
       - Video complete → snap to 1.0
 
     This way the bar moves visibly during long transcriptions instead
@@ -126,6 +127,8 @@ class ProgressTracker:
         self._use_rich = sys.stderr.isatty() and not os.environ.get("NO_COLOR")
         # Per-video fractional progress (0.0 to 1.0)
         self._video_progress: dict[str, float] = {}
+        self._heartbeat_steps: dict[str, float] = {}
+        self._current_video = ""
         self._vlock = threading.Lock()
 
         if self._use_rich:
@@ -135,6 +138,7 @@ class ProgressTracker:
                 TextColumn("[bold]{task.description}"),
                 BarColumn(bar_width=30),
                 TaskProgressColumn(),
+                TextColumn("{task.fields[file_progress]}", justify="right"),
                 TextColumn("eta"),
                 TimeRemainingColumn(),
                 TextColumn("elapsed"),
@@ -142,12 +146,20 @@ class ProgressTracker:
                 console=self._console,
                 transient=False,
             )
-            self._task = self._progress.add_task("Starting...", total=float(total))
+            self._task = self._progress.add_task(
+                "Starting...",
+                total=float(total),
+                file_progress="file 0%",
+            )
             self._progress.start()
         else:
             self._progress = None
             self._task = None
             self._completed = 0
+
+    def _format_file_progress(self, video: str) -> str:
+        fraction = self._video_progress.get(video, 0.0)
+        return f"file {fraction * 100:>3.0f}%"
 
     def _advance_to(self, video: str, fraction: float) -> None:
         """Advance a video's progress to the given fraction (0.0-1.0).
@@ -161,13 +173,23 @@ class ProgressTracker:
             self._video_progress[video] = new
 
         if self._progress:
-            self._progress.update(self._task, advance=delta)
+            kwargs = {"advance": delta}
+            with self._vlock:
+                if self._current_video == video:
+                    kwargs["file_progress"] = self._format_file_progress(video)
+            self._progress.update(self._task, **kwargs)
 
     def update(self, video: str, stage_name: str) -> None:
         """Update the progress bar description with the current video and stage."""
         desc = f"{stage_name}... {video}"
+        with self._vlock:
+            self._current_video = video
         if self._progress:
-            self._progress.update(self._task, description=desc)
+            self._progress.update(
+                self._task,
+                description=desc,
+                file_progress=self._format_file_progress(video),
+            )
         else:
             _print(f"  [{stage_name}] {video}")
 
@@ -175,11 +197,19 @@ class ProgressTracker:
         """Audio extraction done — advance to 5%."""
         self._advance_to(video, _EXTRACT_FRACTION)
 
+    def begin_transcription(self, video: str, duration_seconds: float) -> None:
+        """Set a duration-aware heartbeat step for the current transcription."""
+        effective_seconds = max(duration_seconds, _MIN_HEARTBEAT_SECONDS)
+        step = (_TRANSCRIBE_CAP - _EXTRACT_FRACTION) / effective_seconds
+        with self._vlock:
+            self._heartbeat_steps[video] = step
+
     def heartbeat(self, video: str) -> None:
         """Transcription heartbeat — advance by a small increment, capped at 90%."""
         with self._vlock:
             current = self._video_progress.get(video, 0.0)
-        target = min(current + _HEARTBEAT_INCREMENT, _TRANSCRIBE_CAP)
+            step = self._heartbeat_steps.get(video, _HEARTBEAT_INCREMENT)
+        target = min(current + step, _TRANSCRIBE_CAP)
         self._advance_to(video, target)
 
     def complete(self, video: str, detail: str = "") -> None:

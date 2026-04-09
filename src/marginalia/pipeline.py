@@ -99,7 +99,7 @@ def run(config: PipelineConfig) -> RunResult:
     if config.mode == Mode.BRIEF:
         cached_count = sum(1 for v in to_process if has_cached_transcript(v.relative, state))
 
-    engine = "apple-speech"
+    engine = "mlx-whisper"
     workers = min(config.concurrency, len(to_process))
     concurrency_tag = f" . workers: {workers}" if workers > 1 else ""
     console.header(
@@ -404,6 +404,7 @@ def _do_transcript(
         audio_path = extract_audio(video.path, Path(tmp_dir))
         tracker.mark_extracted(rel)
 
+        tracker.begin_transcription(rel, video.duration_seconds or 0.0)
         tracker.update(rel, "Transcribing")
         logger.video_stage(rel, "transcribing")
         transcript_text = transcribe_local(
@@ -520,6 +521,7 @@ def _fresh_transcribe(
         audio_path = extract_audio(video.path, Path(tmp_dir))
         tracker.mark_extracted(video.relative)
 
+        tracker.begin_transcription(video.relative, video.duration_seconds or 0.0)
         tracker.update(video.relative, "Transcribing")
         logger.video_stage(video.relative, "transcribing")
         transcript_text = transcribe_local(

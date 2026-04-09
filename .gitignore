@@ -9,3 +9,4 @@ dist/
 **/.marginalia-state.json.bak
 **/.logs/
 src/marginalia/swift/transcribe_helper
+uv.lock

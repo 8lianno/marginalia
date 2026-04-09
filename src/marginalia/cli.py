@@ -20,7 +20,7 @@ def extract(
     force: bool = typer.Option(False, "--force", help="Bypass skip logic, reprocess everything"),
     force_path: str | None = typer.Option(None, "--path", help="Restrict --force to a specific video path"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts"),
-    verbose: bool = typer.Option(False, "--verbose", help="Show ffmpeg, Swift helper, and LLM details"),
+    verbose: bool = typer.Option(False, "--verbose", help="Show ffmpeg, whisper, and LLM details"),
     no_preflight: bool = typer.Option(False, "--no-preflight", help="Skip API key validation in brief mode"),
     concurrency: int = typer.Option(1, "--concurrency", "-j", help="Number of videos to process in parallel"),
 ) -> None:

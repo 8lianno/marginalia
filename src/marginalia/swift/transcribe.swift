@@ -5,7 +5,7 @@ import Speech
 /// Usage: transcribe <path-to-wav>
 ///
 /// Protocol:
-///   stdout line "."         = heartbeat (partial result received, transcription is progressing)
+///   stdout line "."         = periodic heartbeat while transcription is in progress
 ///   stdout line "TRANSCRIPT: <text>"  = final transcript (last line before exit 0)
 ///   stderr "Error: ..."     = error messages
 ///
@@ -22,6 +22,7 @@ func writeError(_ message: String) {
 
 func writeHeartbeat() {
     FileHandle.standardOutput.write(".\n".data(using: .utf8)!)
+    fflush(stdout)
 }
 
 guard CommandLine.arguments.count == 2 else {
@@ -55,24 +56,48 @@ if !recognizer.supportsOnDeviceRecognition {
 let semaphore = DispatchSemaphore(value: 0)
 var transcriptText = ""
 var transcriptError: Error?
+let stateQueue = DispatchQueue(label: "marginalia.transcribe.state")
+let heartbeatQueue = DispatchQueue(label: "marginalia.transcribe.heartbeat")
+let heartbeatTimer = DispatchSource.makeTimerSource(queue: heartbeatQueue)
+var finished = false
+
+func finishOnce() {
+    let shouldSignal = stateQueue.sync { () -> Bool in
+        if finished {
+            return false
+        }
+        finished = true
+        return true
+    }
+    if shouldSignal {
+        heartbeatTimer.cancel()
+        semaphore.signal()
+    }
+}
 
 let request = SFSpeechURLRecognitionRequest(url: audioURL)
 request.requiresOnDeviceRecognition = true
 request.shouldReportPartialResults = true
 
+heartbeatTimer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+heartbeatTimer.setEventHandler {
+    let shouldBeat = stateQueue.sync { !finished }
+    if shouldBeat {
+        writeHeartbeat()
+    }
+}
+heartbeatTimer.resume()
+
 recognizer.recognitionTask(with: request) { result, error in
     if let error = error {
         transcriptError = error
-        semaphore.signal()
+        finishOnce()
         return
     }
     if let result = result {
         if result.isFinal {
             transcriptText = result.bestTranscription.formattedString
-            semaphore.signal()
-        } else {
-            // Emit a heartbeat so the Python caller knows we're alive
-            writeHeartbeat()
+            finishOnce()
         }
     }
 }
@@ -91,3 +116,4 @@ if let error = transcriptError {
 
 // Final transcript on a prefixed line so Python can distinguish it from heartbeats
 print("TRANSCRIPT: \(transcriptText)")
+fflush(stdout)

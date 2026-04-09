@@ -1,132 +1,34 @@
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 
-# Path to the Swift helper source and compiled binary
-_SWIFT_SRC = Path(__file__).parent / "swift" / "transcribe.swift"
-_BINARY_DIR = Path(__file__).parent / "swift"
-_BINARY_NAME = "transcribe_helper"
-
-# Known error prefixes from the Swift helper for structured error messages
-_ERROR_MESSAGES = {
-    "SPEECH_LOCALE_UNAVAILABLE": "Speech recognizer not available for en-US locale.",
-    "SPEECH_NOT_AVAILABLE": (
-        "On-device speech recognition is not available.\n"
-        "  Fix: System Settings > Privacy & Security > Speech Recognition — enable access.\n"
-        "  Also: System Settings > General > Keyboard > Dictation — enable on-device."
-    ),
-    "SPEECH_MODEL_NOT_DOWNLOADED": (
-        "On-device speech model is not downloaded.\n"
-        "  Fix: System Settings > General > Keyboard > Dictation — enable 'On-Device Dictation'."
-    ),
-    "SPEECH_PERMISSION_DENIED": (
-        "Speech recognition permission denied.\n"
-        "  Fix: System Settings > Privacy & Security > Speech Recognition — grant access."
-    ),
-    "RECOGNITION_FAILED": "Apple Speech recognition failed during processing.",
-}
-
-
-def _binary_path() -> Path:
-    return _BINARY_DIR / _BINARY_NAME
-
-
-def _ensure_binary() -> Path:
-    """Compile the Swift helper if the binary doesn't exist or is older than source."""
-    binary = _binary_path()
-    if binary.exists() and binary.stat().st_mtime >= _SWIFT_SRC.stat().st_mtime:
-        return binary
-
-    # Check swiftc is available
-    if not shutil.which("swiftc"):
-        raise RuntimeError(
-            "swiftc not found. Install Xcode Command Line Tools: run `xcode-select --install`"
-        )
-
-    print("  Compiling Apple Speech helper...", file=sys.stderr)
-    try:
-        subprocess.run(
-            [
-                "swiftc",
-                "-O",
-                "-o", str(binary),
-                str(_SWIFT_SRC),
-                "-framework", "Speech",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.strip() if e.stderr else "unknown error"
-        raise RuntimeError(
-            f"Swift helper compilation failed:\n{stderr}\n\n"
-            f"Ensure Xcode Command Line Tools are installed: `xcode-select --install`"
-        ) from None
-
-    return binary
+# Default Whisper model — runs on Apple GPU via MLX
+_DEFAULT_MODEL = "mlx-community/whisper-base-mlx"
 
 
 def transcribe_local(
     audio_path: Path,
     on_heartbeat: callable | None = None,
 ) -> str:
-    """Transcribe a WAV file using the Apple Speech Swift helper.
-
-    The Swift helper emits "." lines as heartbeats during transcription
-    and a final "TRANSCRIPT: <text>" line when done.  We stream stdout
-    line-by-line via Popen so the caller can update a progress bar in
-    real time.
+    """Transcribe an audio file using MLX-Whisper on Apple Silicon GPU.
 
     Args:
-        audio_path: Path to the WAV file.
-        on_heartbeat: Optional callback invoked on each heartbeat (no args).
+        audio_path: Path to the audio file (WAV, etc.).
+        on_heartbeat: Optional callback (unused — mlx-whisper is fast enough
+                      that heartbeat pacing is unnecessary).
 
     Returns:
         The transcript text.
     """
-    binary = _ensure_binary()
-    proc = subprocess.Popen(
-        [str(binary), str(audio_path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    import mlx_whisper
+
+    result = mlx_whisper.transcribe(
+        str(audio_path),
+        path_or_hf_repo=_DEFAULT_MODEL,
+        fp16=True,
     )
-
-    transcript = ""
-    try:
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if line == ".":
-                if on_heartbeat:
-                    on_heartbeat()
-            elif line.startswith("TRANSCRIPT: "):
-                transcript = line[len("TRANSCRIPT: "):]
-            # Ignore any other lines
-    except Exception:
-        proc.kill()
-        raise
-
-    proc.wait()
-
-    if proc.returncode != 0:
-        error = (proc.stderr.read() if proc.stderr else "").strip() or "Unknown transcription error"
-        friendly = _parse_helper_error(error)
-        raise RuntimeError(friendly)
-
-    return transcript
-
-
-def _parse_helper_error(raw_error: str) -> str:
-    """Map Swift helper error codes to user-friendly messages."""
-    for prefix, message in _ERROR_MESSAGES.items():
-        if prefix in raw_error:
-            return message
-    return f"Apple Speech transcription failed: {raw_error}"
+    return result["text"].strip()
 
 
 # --- Brief mode: LLM summarization ---

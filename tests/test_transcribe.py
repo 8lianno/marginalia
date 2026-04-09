@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from marginalia.transcribe import _parse_helper_error, check_transcript_length
+from marginalia.transcribe import _parse_helper_error, check_transcript_length, transcribe_local
 
 
 def test_parse_speech_locale_error():
@@ -46,3 +48,29 @@ def test_check_transcript_length_unknown_model():
     # Unknown model — should not raise (let the API handle it)
     huge_transcript = "word " * 1_000_000
     check_transcript_length(huge_transcript, "Summarize", "unknown-model-xyz")
+
+
+def test_transcribe_local_streams_heartbeats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    helper = tmp_path / "fake_helper"
+    helper.write_text(
+        "#!/bin/sh\n"
+        "printf '.\\n'\n"
+        "printf '.\\n'\n"
+        "printf 'TRANSCRIPT: hello from helper\\n'\n"
+    )
+    helper.chmod(0o755)
+
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake-audio")
+
+    monkeypatch.setattr("marginalia.transcribe._ensure_binary", lambda: helper)
+
+    heartbeats = 0
+    def on_heartbeat() -> None:
+        nonlocal heartbeats
+        heartbeats += 1
+
+    transcript = transcribe_local(audio_path, on_heartbeat=on_heartbeat)
+
+    assert transcript == "hello from helper"
+    assert heartbeats == 2

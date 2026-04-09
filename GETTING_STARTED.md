@@ -66,7 +66,7 @@ This will:
 - Discover all video files (`.mp4`, `.mkv`, `.mov`, `.webm`, `.m4v`)
 - Extract audio from each video
 - Transcribe using Apple Speech (on-device, free, no network)
-- Write one `.md` file per video to the current directory
+- Write one `.md` file per video to `./marginalia/`
 
 Example output:
 

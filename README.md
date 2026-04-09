@@ -33,7 +33,7 @@ uv sync
 marginalia extract ./my-course
 ```
 
-This walks the course folder, extracts audio from every video, transcribes it locally using Apple Speech, and writes one markdown file per video to the current directory.
+This walks the course folder, extracts audio from every video, transcribes it locally using Apple Speech, and writes one markdown file per video to `./marginalia/`.
 
 ### Brief mode
 
@@ -93,7 +93,7 @@ marginalia extract ./my-course --force --yes
 ```
 marginalia extract <course> [options]
 
-  -o, --output DIR       Output directory (default: current directory)
+  -o, --output DIR       Output directory (default: ./marginalia/)
   -m, --mode MODE        transcript (default) or brief
   --model TEXT           LLM model for brief mode (default: gemini-2.0-flash)
   --force                Reprocess everything, ignore prior state

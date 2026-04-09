@@ -4,7 +4,10 @@ import os
 import sys
 import threading
 
-# ANSI color codes
+from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+
+# ANSI color codes (used for non-progress output)
 _GREEN = "\033[32m"
 _YELLOW = "\033[33m"
 _RED = "\033[31m"
@@ -94,3 +97,75 @@ def confirm(message: str) -> bool:
     with _lock:
         response = input(f"  {message} [y/N] ").strip().lower()
     return response in ("y", "yes")
+
+
+# --- Progress bar ---
+
+
+class ProgressTracker:
+    """Dynamic progress bar with ETA using rich. Thread-safe.
+
+    Falls back to plain text in non-TTY / NO_COLOR environments.
+    """
+
+    def __init__(self, total: int):
+        self._total = total
+        self._use_rich = sys.stderr.isatty() and not os.environ.get("NO_COLOR")
+
+        if self._use_rich:
+            self._console = Console(stderr=True)
+            self._progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[bold]{task.description}"),
+                BarColumn(bar_width=30),
+                TaskProgressColumn(),
+                TextColumn("eta"),
+                TimeRemainingColumn(),
+                TextColumn("elapsed"),
+                TimeElapsedColumn(),
+                console=self._console,
+                transient=False,
+            )
+            self._task = self._progress.add_task("Starting...", total=total)
+            self._progress.start()
+        else:
+            self._progress = None
+            self._task = None
+            self._completed = 0
+
+    def update(self, video: str, stage_name: str) -> None:
+        """Update the progress bar description with the current video and stage."""
+        desc = f"{stage_name}... {video}"
+        if self._progress:
+            self._progress.update(self._task, description=desc)
+        else:
+            _print(f"  [{stage_name}] {video}")
+
+    def advance(self, video: str, detail: str = "") -> None:
+        """Mark one video as complete and advance the bar."""
+        suffix = f" ({detail})" if detail else ""
+        if self._progress:
+            self._progress.update(self._task, advance=1)
+            self._progress.console.print(f"  [green]+ done: {video}{suffix}[/green]")
+        else:
+            self._completed += 1
+            _print(f"  {_c(_GREEN, f'+ done: {video}{suffix}')}")
+
+    def log_failure(self, video: str, reason: str) -> None:
+        """Print a failure message above the progress bar."""
+        if self._progress:
+            self._progress.console.print(f"  [red]x failed: {video} -- {reason}[/red]")
+        else:
+            _print(f"  {_c(_RED, f'x failed: {video} -- {reason}')}")
+
+    def log(self, message: str) -> None:
+        """Print a message above the progress bar."""
+        if self._progress:
+            self._progress.console.print(f"  {message}")
+        else:
+            _print(f"  {message}")
+
+    def stop(self) -> None:
+        """Stop and clean up the progress bar."""
+        if self._progress:
+            self._progress.stop()

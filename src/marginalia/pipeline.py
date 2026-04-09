@@ -12,6 +12,7 @@ from pathlib import Path
 from marginalia import console
 from marginalia.audio import extract_audio, probe_duration
 from marginalia.brief import build_prompt, format_brief, format_duration, format_transcript
+from marginalia.console import ProgressTracker
 from marginalia.cost import estimate_cost
 from marginalia.discovery import discover
 from marginalia.logging import RunLogger
@@ -142,7 +143,7 @@ def run(config: PipelineConfig) -> RunResult:
         concurrency=workers,
     )
 
-    # 6. Process videos — parallel or sequential
+    # 6. Process videos with progress bar
     total = len(to_process)
     result = _process_batch(config, state, to_process, total, logger, workers, result)
 
@@ -208,24 +209,22 @@ def _process_batch(
     workers: int,
     result: RunResult,
 ) -> RunResult:
-    """Process a list of videos, either sequentially or in parallel."""
+    """Process a list of videos with a progress bar."""
+    tracker = ProgressTracker(total)
+
     if workers <= 1:
-        # Sequential — same as before, no thread overhead
         for i, video in enumerate(videos, 1):
-            _run_one(config, state, video, i, total, logger, result)
+            _run_one(config, state, video, i, total, logger, result, tracker)
     else:
-        # Parallel via ThreadPoolExecutor
-        # Each video gets a fixed slot number for console output
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_run_one, config, state, video, i, total, logger, result): video
+                pool.submit(_run_one, config, state, video, i, total, logger, result, tracker): video
                 for i, video in enumerate(videos, 1)
             }
-            # Wait for all to complete (results collected via shared `result`)
             for future in as_completed(futures):
-                # Exceptions inside _run_one are caught internally,
-                # but propagate unexpected ones here as a safety net.
                 future.result()
+
+    tracker.stop()
     return result
 
 
@@ -237,18 +236,20 @@ def _run_one(
     total: int,
     logger: RunLogger,
     result: RunResult,
+    tracker: ProgressTracker,
 ) -> None:
     """Process a single video with error isolation. Updates `result` in place (thread-safe)."""
     try:
-        cost = _process_single(config, state, video, index, total, logger)
+        cost = _process_single(config, state, video, index, total, logger, tracker)
         with _state_lock:
             result.processed += 1
             result.total_cost_usd += cost
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        console.failure(video.relative, str(e))
+        tracker.log_failure(video.relative, str(e))
         logger.video_failure(video.relative, config.mode.value, error_msg, exc=e)
         _record_failure(config, state, video, error_msg)
+        tracker.advance(video.relative)  # advance bar even on failure so ETA stays accurate
         with _state_lock:
             result.failed += 1
             result.errors.append((video.relative, error_msg))
@@ -353,12 +354,12 @@ def _process_single(
     index: int,
     total: int,
     logger: RunLogger,
+    tracker: ProgressTracker,
 ) -> float:
     """Process a single video. Returns cost_usd. Thread-safe."""
     rel = video.relative
     now = datetime.now(timezone.utc).isoformat()
 
-    # State mutations are protected by _state_lock
     with _state_lock:
         if rel not in state.videos:
             state.videos[rel] = VideoState(fingerprint=video.fingerprint)
@@ -370,7 +371,7 @@ def _process_single(
             entry.brief = None
 
     if video.duration_seconds is None:
-        console.stage(index, total, "Probing", rel)
+        tracker.update(rel, "Probing")
         logger.video_stage(rel, "probing")
         video.duration_seconds = probe_duration(video.path)
         with _state_lock:
@@ -380,9 +381,9 @@ def _process_single(
             entry.duration_seconds = video.duration_seconds
 
     if config.mode == Mode.TRANSCRIPT:
-        return _do_transcript(config, state, entry, video, index, total, now, logger)
+        return _do_transcript(config, state, entry, video, index, total, now, logger, tracker)
     else:
-        return _do_brief(config, state, entry, video, index, total, now, logger)
+        return _do_brief(config, state, entry, video, index, total, now, logger, tracker)
 
 
 def _do_transcript(
@@ -394,15 +395,16 @@ def _do_transcript(
     total: int,
     now: str,
     logger: RunLogger,
+    tracker: ProgressTracker,
 ) -> float:
     rel = video.relative
 
-    console.stage(index, total, "Extracting audio", rel)
+    tracker.update(rel, "Extracting audio")
     logger.video_stage(rel, "extracting_audio")
     with tempfile.TemporaryDirectory() as tmp_dir:
         audio_path = extract_audio(video.path, Path(tmp_dir))
 
-        console.stage(index, total, "Transcribing", rel)
+        tracker.update(rel, "Transcribing")
         logger.video_stage(rel, "transcribing")
         transcript_text = transcribe_local(audio_path)
 
@@ -421,7 +423,7 @@ def _do_transcript(
     with _state_lock:
         entry.transcript = ModeState(status=VideoStatus.COMPLETED, processed_at=now)
     save_state(config.output_dir, state)
-    console.success(rel)
+    tracker.advance(rel)
     logger.video_success(rel, "transcript")
     return 0.0
 
@@ -435,11 +437,11 @@ def _do_brief(
     total: int,
     now: str,
     logger: RunLogger,
+    tracker: ProgressTracker,
 ) -> float:
     rel = video.relative
     detail_parts = []
 
-    # Step 1: Get transcript (from cache or fresh)
     with _state_lock:
         has_transcript = entry.transcript and entry.transcript.status == VideoStatus.COMPLETED
 
@@ -449,17 +451,16 @@ def _do_brief(
             transcript_text = _extract_transcript_body(transcript_path.read_text())
             detail_parts.append("cached")
         else:
-            transcript_text = _fresh_transcribe(config, state, entry, video, index, total, now, logger)
+            transcript_text = _fresh_transcribe(config, state, entry, video, index, total, now, logger, tracker)
             detail_parts.append("transcribed")
     else:
-        transcript_text = _fresh_transcribe(config, state, entry, video, index, total, now, logger)
+        transcript_text = _fresh_transcribe(config, state, entry, video, index, total, now, logger, tracker)
         detail_parts.append("transcribed")
 
     if not transcript_text.strip():
         raise RuntimeError("Transcript is empty — cannot generate brief")
 
-    # Step 2: Call LLM
-    console.stage(index, total, "Generating brief", rel)
+    tracker.update(rel, "Generating brief")
     logger.video_stage(rel, "generating_brief")
     duration_str = format_duration(video.duration_seconds or 0.0)
     prompt = build_prompt(rel, duration_str)
@@ -494,7 +495,7 @@ def _do_brief(
             cost_usd=cost_usd,
         )
     save_state(config.output_dir, state)
-    console.success(rel, ", ".join(detail_parts))
+    tracker.advance(rel, ", ".join(detail_parts))
     logger.video_success(rel, "brief", cost_usd)
     return cost_usd
 
@@ -508,13 +509,14 @@ def _fresh_transcribe(
     total: int,
     now: str,
     logger: RunLogger,
+    tracker: ProgressTracker,
 ) -> str:
     """Extract audio and transcribe locally. Thread-safe state updates."""
-    console.stage(index, total, "Extracting audio", video.relative)
+    tracker.update(video.relative, "Extracting audio")
     logger.video_stage(video.relative, "extracting_audio")
     with tempfile.TemporaryDirectory() as tmp_dir:
         audio_path = extract_audio(video.path, Path(tmp_dir))
-        console.stage(index, total, "Transcribing", video.relative)
+        tracker.update(video.relative, "Transcribing")
         logger.video_stage(video.relative, "transcribing")
         transcript_text = transcribe_local(audio_path)
 

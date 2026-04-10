@@ -10,3 +10,8 @@ dist/
 **/.logs/
 src/marginalia/swift/transcribe_helper
 uv.lock
+
+# Default notes-mode output lands in ./marginalia/ at the repo root when
+# users test without passing -o. Anchored to root so src/marginalia/ stays
+# tracked.
+/marginalia/

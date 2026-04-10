@@ -90,6 +90,9 @@ def run(config: PipelineConfig) -> RunResult:
             console.info(f"No videos found in {config.input_dir}")
             return result
 
+    if config.limit is not None and config.limit > 0:
+        videos = videos[: config.limit]
+
     # 2. Load state
     state = load_state(config.output_dir)
 
@@ -302,6 +305,9 @@ def run_plan(config: PipelineConfig) -> RunResult:
         if not videos:
             console.info(f"No videos found in {config.input_dir}")
             return result
+
+    if config.limit is not None and config.limit > 0:
+        videos = videos[: config.limit]
 
     state = load_state(config.output_dir)
 
@@ -608,6 +614,24 @@ def _do_notes(
     if not timestamped_text.strip():
         raise RuntimeError("Transcript is empty — cannot generate notes")
 
+    # Folder-per-video layout: <output_dir>/<video-slug>/transcript.md + notes.md
+    # This lets the user verify notes against the raw transcript side-by-side.
+    video_folder = config.output_dir / Path(video.md_relative).with_suffix("")
+    video_folder.mkdir(parents=True, exist_ok=True)
+
+    # 1) Write the raw timestamped transcript first. Timestamps are linkified
+    #    to YouTube when available so you can click straight into the video
+    #    from the raw transcript too.
+    transcript_body = linkify_timestamps(timestamped_text, video.youtube_id)
+    transcript_md = _format_raw_transcript_md(
+        body=transcript_body,
+        video=video,
+        engine=engine_name,
+        processed_at=now,
+    )
+    (video_folder / "transcript.md").write_text(transcript_md)
+
+    # 2) Generate comprehensive notes via the LLM.
     tracker.update(rel, "Generating notes")
     logger.video_stage(rel, "generating_notes")
     duration_str = format_duration(video.duration_seconds or 0.0)
@@ -637,10 +661,7 @@ def _do_notes(
         channel=video.channel,
     )
     markdown = format_notes(linked_body, meta)
-
-    output_path = config.output_dir / video.md_relative
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(markdown)
+    (video_folder / "notes.md").write_text(markdown)
 
     with _state_lock:
         entry.notes = ModeState(
@@ -695,6 +716,33 @@ def _fresh_transcribe(
         entry.transcript = ModeState(status=VideoStatus.COMPLETED, processed_at=now)
     save_state(config.output_dir, state)
     return transcript_text
+
+
+def _format_raw_transcript_md(body: str, video: VideoFile, engine: str, processed_at: str) -> str:
+    """Minimal markdown wrapper around the raw timestamped transcript.
+
+    Used by notes mode to persist the source transcript alongside the notes
+    so the reader can verify any claim against the original text.
+    """
+    title = video.title or Path(video.md_relative).stem
+    lines = ["---"]
+    lines.append(f'source: "{video.relative}"')
+    if video.youtube_url:
+        lines.append(f'source_url: "{video.youtube_url}"')
+    if video.title:
+        safe_title = video.title.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'title: "{safe_title}"')
+    if video.channel:
+        safe_channel = video.channel.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'channel: "{safe_channel}"')
+    lines.append(f'fingerprint: "{video.fingerprint}"')
+    lines.append(f"duration_seconds: {video.duration_seconds or 0.0}")
+    lines.append(f'processed_at: "{processed_at}"')
+    lines.append('mode: "transcript"')
+    lines.append(f'engine: "{engine}"')
+    lines.append("---")
+    frontmatter = "\n".join(lines)
+    return f"{frontmatter}\n\n# {title} — Transcript\n\n{body}\n"
 
 
 def _extract_transcript_body(markdown: str) -> str:

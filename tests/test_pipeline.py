@@ -579,20 +579,30 @@ def test_notes_mode_youtube_playlist(mock_discover, mock_fetch, mock_summarize, 
     assert result.failed == 0
     assert result.total_cost_usd > 0.0
 
-    # Output dir should have slug appended
+    # Output dir should have slug appended, with one folder per video
+    # containing both transcript.md and notes.md.
     final_dir = output / "My-Course"
     assert final_dir.exists()
-    assert (final_dir / "01-lesson-1.md").exists()
-    assert (final_dir / "02-lesson-2.md").exists()
-    assert (final_dir / "03-lesson-3.md").exists()
+    for slug in ("01-lesson-1", "02-lesson-2", "03-lesson-3"):
+        folder = final_dir / slug
+        assert folder.is_dir(), f"missing folder {slug}"
+        assert (folder / "transcript.md").exists(), f"missing transcript in {slug}"
+        assert (folder / "notes.md").exists(), f"missing notes in {slug}"
 
-    content = (final_dir / "01-lesson-1.md").read_text()
-    assert 'mode: "notes"' in content
-    assert 'engine: "youtube-captions"' in content
-    assert 'source_url: "https://www.youtube.com/watch?v=vid1"' in content
+    notes_content = (final_dir / "01-lesson-1" / "notes.md").read_text()
+    assert 'mode: "notes"' in notes_content
+    assert 'engine: "youtube-captions"' in notes_content
+    assert 'source_url: "https://www.youtube.com/watch?v=vid1"' in notes_content
     # Timestamps must be linkified to the matching video
-    assert "[[00:00]](https://www.youtube.com/watch?v=vid1&t=0s)" in content
-    assert "[[01:05]](https://www.youtube.com/watch?v=vid1&t=65s)" in content
+    assert "[[00:00]](https://www.youtube.com/watch?v=vid1&t=0s)" in notes_content
+    assert "[[01:05]](https://www.youtube.com/watch?v=vid1&t=65s)" in notes_content
+
+    # Raw transcript file carries the timestamped lines (linkified)
+    transcript_content = (final_dir / "01-lesson-1" / "transcript.md").read_text()
+    assert 'mode: "transcript"' in transcript_content
+    assert 'engine: "youtube-captions"' in transcript_content
+    assert "Welcome to the lecture" in transcript_content
+    assert "https://www.youtube.com/watch?v=vid1&t=" in transcript_content
 
     # State tracks notes mode
     state = load_state(final_dir)
@@ -710,13 +720,24 @@ def test_notes_mode_local_video(mock_probe, mock_extract, mock_seg, mock_summari
 
     assert result.processed == 2
     assert result.failed == 0
-    assert (output / "lesson1.md").exists()
-    content = (output / "lesson1.md").read_text()
+    # Folder-per-video layout for local sources too.
+    lesson1 = output / "lesson1"
+    assert lesson1.is_dir()
+    assert (lesson1 / "notes.md").exists()
+    assert (lesson1 / "transcript.md").exists()
+
+    content = (lesson1 / "notes.md").read_text()
     assert 'mode: "notes"' in content
     assert 'engine: "mlx-whisper"' in content
     # Local notes should NOT linkify timestamps (no video URL to link to)
     assert "[[00:00]]" not in content
     assert "[00:00]" in content
+
+    transcript_content = (lesson1 / "transcript.md").read_text()
+    assert 'mode: "transcript"' in transcript_content
+    assert 'engine: "mlx-whisper"' in transcript_content
+    assert "intro" in transcript_content
+    assert "body" in transcript_content
 
     state = load_state(output)
     for entry in state.videos.values():

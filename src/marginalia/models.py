@@ -120,3 +120,4 @@ class PipelineConfig(BaseModel):
     concurrency: int = 1
     youtube_url: str | None = None  # Set when source is a YouTube URL instead of a local directory
     youtube_append_slug: bool = False  # If True, pipeline appends the playlist slug to output_dir after discovery
+    limit: int | None = None  # Max number of videos to process (applied after sort/discovery). Useful for one-off tests.

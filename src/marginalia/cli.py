@@ -43,6 +43,7 @@ def _build_youtube_config(
     verbose: bool,
     no_preflight: bool,
     concurrency: int,
+    limit: int | None = None,
 ) -> PipelineConfig:
     append_slug = output is None
     return PipelineConfig(
@@ -61,6 +62,7 @@ def _build_youtube_config(
         concurrency=concurrency,
         youtube_url=url,
         youtube_append_slug=append_slug,
+        limit=limit,
     )
 
 
@@ -76,6 +78,7 @@ def extract(
     verbose: bool = typer.Option(False, "--verbose", help="Show ffmpeg, whisper, and LLM details"),
     no_preflight: bool = typer.Option(False, "--no-preflight", help="Skip API key validation in brief/notes mode"),
     concurrency: int = typer.Option(1, "--concurrency", "-j", help="Number of videos to process in parallel"),
+    limit: int = typer.Option(0, "--limit", "-n", help="Process at most N videos (0 = all). Useful for testing."),
 ) -> None:
     """Extract transcripts, briefs, or detailed timestamped notes from course videos."""
     if mode in (Mode.BRIEF, Mode.NOTES) and not os.environ.get("GEMINI_API_KEY"):
@@ -90,9 +93,15 @@ def extract(
         print("Error: --concurrency must be at least 1", file=sys.stderr)
         raise typer.Exit(1)
 
+    if limit < 0:
+        print("Error: --limit must be >= 0", file=sys.stderr)
+        raise typer.Exit(1)
+    limit_value = limit if limit > 0 else None
+
     if is_youtube_url(course):
         config = _build_youtube_config(
-            course, output, mode, model, force, force_path, yes, verbose, no_preflight, concurrency
+            course, output, mode, model, force, force_path, yes, verbose, no_preflight, concurrency,
+            limit=limit_value,
         )
     else:
         course_path = Path(course)
@@ -110,6 +119,7 @@ def extract(
             verbose=verbose,
             no_preflight=no_preflight,
             concurrency=concurrency,
+            limit=limit_value,
         )
 
     from marginalia.pipeline import run
@@ -126,12 +136,15 @@ def plan(
     model: str = typer.Option("gemini-2.0-flash", "--model", help="LLM model for brief/notes mode"),
     force: bool = typer.Option(False, "--force", help="Show what force would reprocess"),
     force_path: str | None = typer.Option(None, "--path", help="Restrict plan to a specific video path"),
+    limit: int = typer.Option(0, "--limit", "-n", help="Plan at most N videos (0 = all)"),
 ) -> None:
     """Preview what would be processed without making changes."""
+    limit_value = limit if limit > 0 else None
     if is_youtube_url(course):
         config = _build_youtube_config(
             course, output, mode, model, force, force_path,
             yes=False, verbose=False, no_preflight=True, concurrency=1,
+            limit=limit_value,
         )
     else:
         course_path = Path(course)
@@ -145,6 +158,7 @@ def plan(
             model=model,
             force=force,
             force_path=force_path,
+            limit=limit_value,
         )
 
     from marginalia.pipeline import run_plan

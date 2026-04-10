@@ -82,6 +82,8 @@ def save_state(output_dir: Path, state: RunState) -> None:
 def get_mode_state(entry: VideoState, mode: Mode) -> ModeState | None:
     if mode == Mode.TRANSCRIPT:
         return entry.transcript
+    if mode == Mode.NOTES:
+        return entry.notes
     return entry.brief
 
 

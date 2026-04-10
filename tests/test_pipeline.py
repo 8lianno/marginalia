@@ -2,9 +2,10 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from marginalia.models import Mode, ModeState, PipelineConfig, RunState, VideoState, VideoStatus
+from marginalia.models import Mode, ModeState, PipelineConfig, RunState, VideoFile, VideoState, VideoStatus
 from marginalia.pipeline import run, run_plan, run_retry
 from marginalia.state import load_state, save_state
+from marginalia.youtube import Segment
 
 
 def _make_course(tmp_path: Path, count: int = 3) -> Path:
@@ -521,3 +522,203 @@ def test_parallel_brief_with_cached_transcripts(mock_probe, mock_extract, mock_t
     for entry in state.videos.values():
         assert entry.brief is not None
         assert entry.brief.status == VideoStatus.COMPLETED
+
+
+# --- Notes mode ---
+
+
+def _youtube_videos(count: int) -> list:
+    width = max(2, len(str(count)))
+    return [
+        VideoFile(
+            path=Path(f"_yt/vid{i}"),
+            relative=f"{str(i).zfill(width)}-lesson-{i}",
+            size=0,
+            mtime=0.0,
+            duration_seconds=120.0,
+            output_name=f"{str(i).zfill(width)}-lesson-{i}.md",
+            youtube_id=f"vid{i}",
+            youtube_url=f"https://www.youtube.com/watch?v=vid{i}",
+            title=f"Lesson {i}",
+            channel="Prof X",
+            playlist_index=i,
+        )
+        for i in range(1, count + 1)
+    ]
+
+
+@patch("marginalia.pipeline.summarize_transcript")
+@patch("marginalia.pipeline.fetch_youtube_transcript")
+@patch("marginalia.pipeline.discover_youtube")
+def test_notes_mode_youtube_playlist(mock_discover, mock_fetch, mock_summarize, tmp_path: Path):
+    mock_discover.return_value = (_youtube_videos(3), "My-Course")
+    mock_fetch.return_value = [
+        Segment(start=0.0, duration=5.0, text="Welcome to the lecture"),
+        Segment(start=12.0, duration=3.0, text="Today we discuss X"),
+        Segment(start=65.0, duration=4.0, text="And also Y"),
+    ]
+    mock_summarize.return_value = (
+        "## Introduction\nThe speaker welcomes the class [00:00].\n\n"
+        "## Main Topic\nTopic X is introduced [00:12] and Y follows [01:05].\n\n"
+        "## Key Takeaways\n- X and Y are related [01:05]",
+        300, 200, 0.005,
+    )
+
+    output = tmp_path / "out"
+    config = PipelineConfig(
+        input_dir=Path("_marginalia_youtube_source_"),
+        output_dir=output,
+        mode=Mode.NOTES,
+        no_preflight=True,
+        youtube_url="https://www.youtube.com/playlist?list=FAKE",
+        youtube_append_slug=True,
+    )
+    result = run(config)
+
+    assert result.processed == 3
+    assert result.failed == 0
+    assert result.total_cost_usd > 0.0
+
+    # Output dir should have slug appended
+    final_dir = output / "My-Course"
+    assert final_dir.exists()
+    assert (final_dir / "01-lesson-1.md").exists()
+    assert (final_dir / "02-lesson-2.md").exists()
+    assert (final_dir / "03-lesson-3.md").exists()
+
+    content = (final_dir / "01-lesson-1.md").read_text()
+    assert 'mode: "notes"' in content
+    assert 'engine: "youtube-captions"' in content
+    assert 'source_url: "https://www.youtube.com/watch?v=vid1"' in content
+    # Timestamps must be linkified to the matching video
+    assert "[[00:00]](https://www.youtube.com/watch?v=vid1&t=0s)" in content
+    assert "[[01:05]](https://www.youtube.com/watch?v=vid1&t=65s)" in content
+
+    # State tracks notes mode
+    state = load_state(final_dir)
+    assert len(state.videos) == 3
+    for entry in state.videos.values():
+        assert entry.notes is not None
+        assert entry.notes.status == VideoStatus.COMPLETED
+        assert entry.notes.cost_usd == 0.005
+        assert entry.transcript is None  # notes mode should not touch transcript state
+
+
+@patch("marginalia.pipeline.summarize_transcript")
+@patch("marginalia.pipeline.fetch_youtube_transcript")
+@patch("marginalia.pipeline.discover_youtube")
+def test_notes_mode_youtube_incremental_skip(mock_discover, mock_fetch, mock_summarize, tmp_path: Path):
+    mock_discover.return_value = (_youtube_videos(2), "Course")
+    mock_fetch.return_value = [Segment(start=0.0, duration=1.0, text="hi")]
+    mock_summarize.return_value = ("## S\nx [00:00]", 10, 10, 0.0001)
+
+    output = tmp_path / "out"
+    config = PipelineConfig(
+        input_dir=Path("_marginalia_youtube_source_"),
+        output_dir=output,
+        mode=Mode.NOTES,
+        no_preflight=True,
+        youtube_url="https://www.youtube.com/playlist?list=X",
+        youtube_append_slug=True,
+    )
+
+    r1 = run(config)
+    assert r1.processed == 2
+
+    mock_fetch.reset_mock()
+    mock_summarize.reset_mock()
+    # Need a second fresh config because run() mutates output_dir via append_slug
+    config2 = PipelineConfig(
+        input_dir=Path("_marginalia_youtube_source_"),
+        output_dir=output,
+        mode=Mode.NOTES,
+        no_preflight=True,
+        youtube_url="https://www.youtube.com/playlist?list=X",
+        youtube_append_slug=True,
+    )
+    r2 = run(config2)
+    assert r2.skipped == 2
+    assert r2.processed == 0
+    mock_fetch.assert_not_called()
+    mock_summarize.assert_not_called()
+
+
+@patch("marginalia.pipeline.summarize_transcript")
+@patch("marginalia.pipeline.fetch_youtube_transcript")
+@patch("marginalia.pipeline.discover_youtube")
+def test_notes_mode_video_without_captions_fails_but_others_succeed(
+    mock_discover, mock_fetch, mock_summarize, tmp_path: Path
+):
+    mock_discover.return_value = (_youtube_videos(3), "Course")
+
+    def fetch_side_effect(video_id):
+        if video_id == "vid2":
+            raise RuntimeError("No transcripts available for video vid2")
+        return [Segment(start=0.0, duration=1.0, text="hi")]
+
+    mock_fetch.side_effect = fetch_side_effect
+    mock_summarize.return_value = ("## S\nx [00:00]", 10, 10, 0.0001)
+
+    output = tmp_path / "out"
+    config = PipelineConfig(
+        input_dir=Path("_marginalia_youtube_source_"),
+        output_dir=output,
+        mode=Mode.NOTES,
+        no_preflight=True,
+        youtube_url="https://www.youtube.com/playlist?list=X",
+        youtube_append_slug=True,
+    )
+    result = run(config)
+
+    assert result.processed == 2
+    assert result.failed == 1
+
+    state = load_state(output / "Course")
+    failed = [rel for rel, e in state.videos.items() if e.notes and e.notes.status == VideoStatus.FAILED]
+    assert len(failed) == 1
+
+
+@patch("marginalia.pipeline.summarize_transcript")
+@patch("marginalia.pipeline.transcribe_local_segments")
+@patch("marginalia.pipeline.extract_audio")
+@patch("marginalia.pipeline.probe_duration")
+def test_notes_mode_local_video(mock_probe, mock_extract, mock_seg, mock_summarize, tmp_path: Path):
+    course = _make_course(tmp_path, 2)
+    output = tmp_path / "output"
+
+    mock_probe.return_value = 60.0
+
+    def fake_extract(video_path, output_dir):
+        audio = output_dir / "audio.wav"
+        audio.write_bytes(b"\x00" * 30)
+        return audio
+
+    mock_extract.side_effect = fake_extract
+    mock_seg.return_value = [
+        Segment(start=0.0, duration=3.0, text="intro"),
+        Segment(start=10.0, duration=3.0, text="body"),
+    ]
+    mock_summarize.return_value = (
+        "## Section\nIntro claim [00:00]. Body claim [00:10].",
+        50, 100, 0.002,
+    )
+
+    config = PipelineConfig(
+        input_dir=course, output_dir=output, mode=Mode.NOTES, no_preflight=True,
+    )
+    result = run(config)
+
+    assert result.processed == 2
+    assert result.failed == 0
+    assert (output / "lesson1.md").exists()
+    content = (output / "lesson1.md").read_text()
+    assert 'mode: "notes"' in content
+    assert 'engine: "mlx-whisper"' in content
+    # Local notes should NOT linkify timestamps (no video URL to link to)
+    assert "[[00:00]]" not in content
+    assert "[00:00]" in content
+
+    state = load_state(output)
+    for entry in state.videos.values():
+        assert entry.notes is not None
+        assert entry.notes.status == VideoStatus.COMPLETED

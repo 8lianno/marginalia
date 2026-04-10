@@ -31,6 +31,38 @@ def transcribe_local(
     return result["text"].strip()
 
 
+def transcribe_local_segments(
+    audio_path: Path,
+    on_heartbeat: callable | None = None,
+) -> list:
+    """Transcribe locally and return segment-level timestamps.
+
+    Returns a list of `marginalia.youtube.Segment` (start, duration, text) so
+    the notes-mode pipeline can treat local videos and YouTube videos
+    uniformly. Keeps `transcribe_local` intact for transcript mode.
+    """
+    import mlx_whisper
+
+    from marginalia.youtube import Segment
+
+    result = mlx_whisper.transcribe(
+        str(audio_path),
+        path_or_hf_repo=_DEFAULT_MODEL,
+        fp16=True,
+    )
+
+    segments_raw = result.get("segments") or []
+    segments: list[Segment] = []
+    for seg in segments_raw:
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        segments.append(Segment(start=start, duration=max(0.0, end - start), text=text))
+    return segments
+
+
 # --- Brief mode: LLM summarization ---
 
 # Model context limits (tokens). Conservative at 80% to leave room for output.

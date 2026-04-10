@@ -11,7 +11,15 @@ from pathlib import Path
 
 from marginalia import console
 from marginalia.audio import extract_audio, probe_duration
-from marginalia.brief import build_prompt, format_brief, format_duration, format_transcript
+from marginalia.brief import (
+    build_notes_prompt,
+    build_prompt,
+    format_brief,
+    format_duration,
+    format_notes,
+    format_transcript,
+    linkify_timestamps,
+)
 from marginalia.console import ProgressTracker
 from marginalia.cost import estimate_cost
 from marginalia.discovery import discover
@@ -20,6 +28,7 @@ from marginalia.models import (
     BriefMeta,
     Mode,
     ModeState,
+    NotesMeta,
     PipelineConfig,
     RunState,
     TranscriptMeta,
@@ -27,6 +36,7 @@ from marginalia.models import (
     VideoState,
     VideoStatus,
 )
+from marginalia.sources import discover_youtube
 from marginalia.state import (
     _state_lock,
     get_failed_videos,
@@ -35,7 +45,16 @@ from marginalia.state import (
     needs_processing,
     save_state,
 )
-from marginalia.transcribe import preflight_check, summarize_transcript, transcribe_local
+from marginalia.transcribe import (
+    preflight_check,
+    summarize_transcript,
+    transcribe_local,
+    transcribe_local_segments,
+)
+from marginalia.youtube import (
+    fetch_youtube_transcript,
+    format_timestamped_transcript,
+)
 
 
 @dataclass
@@ -55,11 +74,21 @@ def run(config: PipelineConfig) -> RunResult:
 
     console.set_verbose(config.verbose)
 
-    # 1. Discover videos
-    videos = discover(config.input_dir)
-    if not videos:
-        console.info(f"No videos found in {config.input_dir}")
-        return result
+    # 1. Discover videos (local directory or YouTube URL)
+    if config.youtube_url:
+        videos, playlist_slug = discover_youtube(config.youtube_url)
+        if config.youtube_append_slug:
+            # Mutate config so output_dir reflects the final resolved path for
+            # the rest of the run (state file, logs, markdown all land here).
+            config.output_dir = config.output_dir / playlist_slug
+        if not videos:
+            console.info(f"No videos found in YouTube source: {config.youtube_url}")
+            return result
+    else:
+        videos = discover(config.input_dir)
+        if not videos:
+            console.info(f"No videos found in {config.input_dir}")
+            return result
 
     # 2. Load state
     state = load_state(config.output_dir)
@@ -87,9 +116,9 @@ def run(config: PipelineConfig) -> RunResult:
         console.summary(result.processed, result.skipped, result.failed, elapsed)
         return result
 
-    # Probe durations
+    # Probe durations (local videos only — YouTube carries duration from metadata)
     for v in to_process:
-        if v.duration_seconds is None:
+        if v.duration_seconds is None and v.youtube_id is None:
             v.duration_seconds = probe_duration(v.path)
 
     total_duration = sum(v.duration_seconds or 0.0 for v in to_process)
@@ -99,7 +128,10 @@ def run(config: PipelineConfig) -> RunResult:
     if config.mode == Mode.BRIEF:
         cached_count = sum(1 for v in to_process if has_cached_transcript(v.relative, state))
 
-    engine = "mlx-whisper"
+    if config.youtube_url:
+        engine = "youtube-captions" if config.mode in (Mode.NOTES,) else "youtube"
+    else:
+        engine = "mlx-whisper"
     workers = min(config.concurrency, len(to_process))
     concurrency_tag = f" . workers: {workers}" if workers > 1 else ""
     console.header(
@@ -119,8 +151,8 @@ def run(config: PipelineConfig) -> RunResult:
             console.info("Aborted.")
             return result
 
-    # Preflight check for brief mode
-    if config.mode == Mode.BRIEF and not config.no_preflight:
+    # Preflight check for modes that hit the LLM
+    if config.mode in (Mode.BRIEF, Mode.NOTES) and not config.no_preflight:
         console.verbose("Running preflight check...")
         try:
             preflight_check(config.model)
@@ -258,10 +290,18 @@ def run_plan(config: PipelineConfig) -> RunResult:
     """Plan mode: show what would be processed without side effects."""
     result = RunResult()
 
-    videos = discover(config.input_dir)
-    if not videos:
-        console.info(f"No videos found in {config.input_dir}")
-        return result
+    if config.youtube_url:
+        videos, playlist_slug = discover_youtube(config.youtube_url)
+        if config.youtube_append_slug:
+            config.output_dir = config.output_dir / playlist_slug
+        if not videos:
+            console.info(f"No videos found in YouTube source: {config.youtube_url}")
+            return result
+    else:
+        videos = discover(config.input_dir)
+        if not videos:
+            console.info(f"No videos found in {config.input_dir}")
+            return result
 
     state = load_state(config.output_dir)
 
@@ -273,7 +313,7 @@ def run_plan(config: PipelineConfig) -> RunResult:
         to_process = [v for v in videos if needs_processing(v, state, config.mode)]
 
     for v in to_process:
-        if v.duration_seconds is None:
+        if v.duration_seconds is None and v.youtube_id is None:
             v.duration_seconds = probe_duration(v.path)
 
     total_duration = sum(v.duration_seconds or 0.0 for v in to_process)
@@ -310,7 +350,7 @@ def run_status(config: PipelineConfig) -> None:
         return
 
     total = len(state.videos)
-    t_done = t_fail = b_done = b_fail = 0
+    t_done = t_fail = b_done = b_fail = n_done = n_fail = 0
     total_duration = 0.0
     failures: list[tuple[str, str, str]] = []
 
@@ -328,14 +368,22 @@ def run_status(config: PipelineConfig) -> None:
             else:
                 b_fail += 1
                 failures.append((rel, "brief", entry.brief.error or "unknown"))
+        if entry.notes:
+            if entry.notes.status == VideoStatus.COMPLETED:
+                n_done += 1
+            else:
+                n_fail += 1
+                failures.append((rel, "notes", entry.notes.error or "unknown"))
 
     t_pending = total - t_done - t_fail
     b_pending = total - b_done - b_fail
+    n_pending = total - n_done - n_fail
 
     console.header(f"course: {config.input_dir}")
     console.info(f"videos: {total} . duration: {format_duration(total_duration)}")
     console.info(f"  transcript: {t_done} processed . {t_fail} failed . {t_pending} pending")
     console.info(f"  brief:      {b_done} processed . {b_fail} failed . {b_pending} pending")
+    console.info(f"  notes:      {n_done} processed . {n_fail} failed . {n_pending} pending")
 
     if failures:
         console.info("failed:")
@@ -369,7 +417,7 @@ def _process_single(
             entry.transcript = None
             entry.brief = None
 
-    if video.duration_seconds is None:
+    if video.duration_seconds is None and video.youtube_id is None:
         tracker.update(rel, "Probing")
         logger.video_stage(rel, "probing")
         video.duration_seconds = probe_duration(video.path)
@@ -381,8 +429,9 @@ def _process_single(
 
     if config.mode == Mode.TRANSCRIPT:
         return _do_transcript(config, state, entry, video, index, total, now, logger, tracker)
-    else:
-        return _do_brief(config, state, entry, video, index, total, now, logger, tracker)
+    if config.mode == Mode.NOTES:
+        return _do_notes(config, state, entry, video, index, total, now, logger, tracker)
+    return _do_brief(config, state, entry, video, index, total, now, logger, tracker)
 
 
 def _do_transcript(
@@ -398,24 +447,34 @@ def _do_transcript(
 ) -> float:
     rel = video.relative
 
-    tracker.update(rel, "Extracting audio")
-    logger.video_stage(rel, "extracting_audio")
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        audio_path = extract_audio(video.path, Path(tmp_dir))
-        tracker.mark_extracted(rel)
+    engine_name = "apple-speech"  # kept for backwards-compat with existing tests
 
-        tracker.begin_transcription(rel, video.duration_seconds or 0.0)
-        tracker.update(rel, "Transcribing")
-        logger.video_stage(rel, "transcribing")
-        transcript_text = transcribe_local(
-            audio_path, on_heartbeat=lambda: tracker.heartbeat(rel)
-        )
+    if video.youtube_id:
+        tracker.update(rel, "Fetching captions")
+        logger.video_stage(rel, "fetching_captions")
+        segments = fetch_youtube_transcript(video.youtube_id)
+        transcript_text = " ".join(seg.text for seg in segments if seg.text).strip()
+        engine_name = "youtube-captions"
+    else:
+        tracker.update(rel, "Extracting audio")
+        logger.video_stage(rel, "extracting_audio")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_path = extract_audio(video.path, Path(tmp_dir))
+            tracker.mark_extracted(rel)
+
+            tracker.begin_transcription(rel, video.duration_seconds or 0.0)
+            tracker.update(rel, "Transcribing")
+            logger.video_stage(rel, "transcribing")
+            transcript_text = transcribe_local(
+                audio_path, on_heartbeat=lambda: tracker.heartbeat(rel)
+            )
 
     meta = TranscriptMeta(
         source=rel,
         fingerprint=video.fingerprint,
         duration_seconds=video.duration_seconds or 0.0,
         processed_at=now,
+        engine=engine_name,
     )
     markdown = format_transcript(transcript_text, meta)
 
@@ -503,6 +562,99 @@ def _do_brief(
     return cost_usd
 
 
+def _do_notes(
+    config: PipelineConfig,
+    state: RunState,
+    entry: VideoState,
+    video: VideoFile,
+    index: int,
+    total: int,
+    now: str,
+    logger: RunLogger,
+    tracker: ProgressTracker,
+) -> float:
+    """Generate comprehensive timestamped lecture notes.
+
+    - YouTube source: fetch captions via youtube_transcript_api (free, pre-timestamped).
+    - Local source: extract audio and use mlx-whisper segment-level output.
+    Both paths hand a uniformly-formatted `[mm:ss] text` transcript to Gemini.
+    """
+    rel = video.relative
+
+    if video.youtube_id:
+        tracker.update(rel, "Fetching captions")
+        logger.video_stage(rel, "fetching_captions")
+        segments = fetch_youtube_transcript(video.youtube_id)
+        engine_name = "youtube-captions"
+    else:
+        tracker.update(rel, "Extracting audio")
+        logger.video_stage(rel, "extracting_audio")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_path = extract_audio(video.path, Path(tmp_dir))
+            tracker.mark_extracted(rel)
+
+            tracker.begin_transcription(rel, video.duration_seconds or 0.0)
+            tracker.update(rel, "Transcribing")
+            logger.video_stage(rel, "transcribing")
+            segments = transcribe_local_segments(
+                audio_path, on_heartbeat=lambda: tracker.heartbeat(rel)
+            )
+        engine_name = "mlx-whisper"
+
+    if not segments:
+        raise RuntimeError("No transcript segments available — cannot generate notes")
+
+    timestamped_text = format_timestamped_transcript(segments)
+    if not timestamped_text.strip():
+        raise RuntimeError("Transcript is empty — cannot generate notes")
+
+    tracker.update(rel, "Generating notes")
+    logger.video_stage(rel, "generating_notes")
+    duration_str = format_duration(video.duration_seconds or 0.0)
+    display_title = video.title or rel
+    source_desc = video.youtube_url or rel
+    prompt = build_notes_prompt(display_title, duration_str, source_desc)
+
+    raw_text, input_tokens, output_tokens, cost_usd = summarize_transcript(
+        timestamped_text, prompt, config.model
+    )
+    cost_usd = cost_usd or 0.0
+
+    console.verbose(f"LLM tokens: input={input_tokens}, output={output_tokens}, cost=${cost_usd:.4f}")
+
+    linked_body = linkify_timestamps(raw_text, video.youtube_id)
+
+    meta = NotesMeta(
+        source=rel,
+        source_url=video.youtube_url,
+        fingerprint=video.fingerprint,
+        duration_seconds=video.duration_seconds or 0.0,
+        processed_at=now,
+        engine=engine_name,
+        model=config.model,
+        cost_usd=cost_usd,
+        title=video.title,
+        channel=video.channel,
+    )
+    markdown = format_notes(linked_body, meta)
+
+    output_path = config.output_dir / video.md_relative
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(markdown)
+
+    with _state_lock:
+        entry.notes = ModeState(
+            status=VideoStatus.COMPLETED,
+            processed_at=now,
+            model=config.model,
+            cost_usd=cost_usd,
+        )
+    save_state(config.output_dir, state)
+    tracker.complete(rel, engine_name)
+    logger.video_success(rel, "notes", cost_usd)
+    return cost_usd
+
+
 def _fresh_transcribe(
     config: PipelineConfig,
     state: RunState,
@@ -571,6 +723,8 @@ def _record_failure(config: PipelineConfig, state: RunState, video: VideoFile, e
         )
         if config.mode == Mode.TRANSCRIPT:
             entry.transcript = mode_state
+        elif config.mode == Mode.NOTES:
+            entry.notes = mode_state
         else:
             entry.brief = mode_state
 

@@ -9,6 +9,12 @@ from marginalia.models import CostEstimate, Mode, VideoFile
 TOKENS_PER_MINUTE_OF_AUDIO = 200
 PROMPT_TOKENS = 500
 OUTPUT_TOKENS_PER_BRIEF = 800
+# Notes mode sends a timestamped transcript (~20% longer than plain) plus a
+# longer instruction preamble, and the model returns comprehensive handout-
+# style notes instead of a 5-section summary — much more output.
+TIMESTAMPED_TOKEN_MULTIPLIER = 1.25
+NOTES_PROMPT_TOKENS = 900
+OUTPUT_TOKENS_PER_NOTES = 3500
 INPUT_PRICE_PER_TOKEN = 0.10 / 1_000_000
 OUTPUT_PRICE_PER_TOKEN = 0.40 / 1_000_000
 
@@ -20,10 +26,20 @@ def estimate_cost(videos: list[VideoFile], mode: Mode) -> CostEstimate:
     if mode == Mode.TRANSCRIPT:
         return CostEstimate(total_duration_seconds=total_seconds, estimated_cost_usd=0.0)
 
-    # Brief mode: estimate from transcript length
     total_minutes = total_seconds / 60.0
-    input_tokens = total_minutes * TOKENS_PER_MINUTE_OF_AUDIO + PROMPT_TOKENS * len(videos)
-    output_tokens = OUTPUT_TOKENS_PER_BRIEF * len(videos)
+    transcript_input_tokens = total_minutes * TOKENS_PER_MINUTE_OF_AUDIO
+
+    if mode == Mode.NOTES:
+        input_tokens = (
+            transcript_input_tokens * TIMESTAMPED_TOKEN_MULTIPLIER
+            + NOTES_PROMPT_TOKENS * len(videos)
+        )
+        output_tokens = OUTPUT_TOKENS_PER_NOTES * len(videos)
+    else:
+        # Brief mode: estimate from transcript length
+        input_tokens = transcript_input_tokens + PROMPT_TOKENS * len(videos)
+        output_tokens = OUTPUT_TOKENS_PER_BRIEF * len(videos)
+
     cost = input_tokens * INPUT_PRICE_PER_TOKEN + output_tokens * OUTPUT_PRICE_PER_TOKEN
     return CostEstimate(
         total_duration_seconds=total_seconds,

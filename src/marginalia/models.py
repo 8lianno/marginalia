@@ -9,6 +9,7 @@ from pydantic import BaseModel
 class Mode(str, Enum):
     TRANSCRIPT = "transcript"
     BRIEF = "brief"
+    NOTES = "notes"
 
 
 class VideoFile(BaseModel):
@@ -19,8 +20,17 @@ class VideoFile(BaseModel):
     duration_seconds: float | None = None
     output_name: str | None = None  # Override for collision resolution
 
+    # Remote-source fields (populated when the video is a YouTube item)
+    youtube_id: str | None = None
+    youtube_url: str | None = None
+    title: str | None = None
+    channel: str | None = None
+    playlist_index: int | None = None
+
     @property
     def fingerprint(self) -> str:
+        if self.youtube_id:
+            return f"yt:{self.youtube_id}"
         return f"{self.size}:{self.mtime}"
 
     @property
@@ -50,10 +60,11 @@ class VideoState(BaseModel):
     duration_seconds: float | None = None
     transcript: ModeState | None = None
     brief: ModeState | None = None
+    notes: ModeState | None = None
 
 
 class RunState(BaseModel):
-    version: int = 2
+    version: int = 3
     videos: dict[str, VideoState] = {}
 
 
@@ -77,6 +88,20 @@ class BriefMeta(BaseModel):
     cost_usd: float
 
 
+class NotesMeta(BaseModel):
+    source: str
+    source_url: str | None = None
+    fingerprint: str
+    duration_seconds: float
+    processed_at: str
+    mode: str = "notes"
+    engine: str  # "youtube-captions" or "mlx-whisper"
+    model: str
+    cost_usd: float
+    title: str | None = None
+    channel: str | None = None
+
+
 class CostEstimate(BaseModel):
     total_duration_seconds: float
     estimated_cost_usd: float
@@ -93,3 +118,5 @@ class PipelineConfig(BaseModel):
     verbose: bool = False
     no_preflight: bool = False
     concurrency: int = 1
+    youtube_url: str | None = None  # Set when source is a YouTube URL instead of a local directory
+    youtube_append_slug: bool = False  # If True, pipeline appends the playlist slug to output_dir after discovery
